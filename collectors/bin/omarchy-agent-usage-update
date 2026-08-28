@@ -33,7 +33,11 @@ elif ((${#only[@]} > 0)); then
   done
 fi
 
-"$packaged_updater" --except codex "$@"
+# Run the packaged updater and the Codex collector concurrently: they touch
+# disjoint state, and a transient failure in an unrelated provider must not
+# prevent the Codex refresh this script exists to guarantee.
+"$packaged_updater" --except codex "$@" &
+packaged_pid=$!
 
 if $codex_wanted; then
   flags=()
@@ -50,3 +54,7 @@ if $codex_wanted; then
   mv "$temporary" "$usage_dir/codex.json"
   trap - EXIT
 fi
+
+packaged_status=0
+wait "$packaged_pid" || packaged_status=$?
+exit "$packaged_status"
