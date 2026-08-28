@@ -57,18 +57,25 @@ mkdir -p "$data_root/scripts" "$data_root/logic"
 cp -a "$(dirname "$source_root")/scripts/calculate-api-cost" "$data_root/scripts/"
 cp -a "$(dirname "$source_root")/logic/cost.js" "$(dirname "$source_root")/logic/api-price-catalogue.js" "$data_root/logic/"
 chmod 0755 "$data_root/bin/agent-usage-plus-collectors" "$data_root/bin/omarchy-agent-usage-openrouter" "$data_root/bin/omarchy-agent-usage-deepseek" "$data_root/bin/omarchy-agent-usage-xai" "$data_root/bin/omarchy-agent-usage-zai" "$data_root/bin/omarchy-agent-usage-gemini" "$data_root/bin/omarchy-agent-usage-cursor" "$data_root/bin/omarchy-agent-usage-kimi" "$data_root/bin/omarchy-agent-usage-opencode-go" "$data_root/bin/omarchy-agent-usage-claude-cost" "$data_root/bin/omarchy-agent-usage-codex-cost" "$data_root/scripts/calculate-api-cost"
-chmod 0755 "$data_root/bin/omarchy-agent-usage-codex-compat"
+chmod 0755 "$data_root/bin/omarchy-agent-usage-codex-compat" "$data_root/bin/omarchy-agent-usage-update"
 
 if $codex_cli_compat; then
   user_bin=${XDG_BIN_HOME:-"$HOME/.local/bin"}
   target="$user_bin/omarchy-agent-usage-codex"
   compat="$data_root/bin/omarchy-agent-usage-codex-compat"
+  updater_target="$user_bin/omarchy-agent-usage-update"
+  updater="$data_root/bin/omarchy-agent-usage-update"
   mkdir -p "$user_bin"
   if [[ -e $target || -L $target ]]; then
     resolved=$(readlink -f "$target" 2>/dev/null || true)
     [[ $resolved == "$compat" ]] || { echo "Refusing to replace an existing local Codex collector: $target" >&2; exit 1; }
   fi
+  if [[ -e $updater_target || -L $updater_target ]]; then
+    resolved=$(readlink -f "$updater_target" 2>/dev/null || true)
+    [[ $resolved == "$updater" ]] || { echo "Refusing to replace an existing local usage updater: $updater_target" >&2; exit 1; }
+  fi
   ln -sfn "$compat" "$target"
+  ln -sfn "$updater" "$updater_target"
 fi
 
 if [[ -n $omarchy_bin ]]; then

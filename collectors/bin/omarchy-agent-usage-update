@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Omarchy's packaged updater discovers collectors under $OMARCHY_PATH/bin and
+# therefore cannot see the user-level Codex compatibility override. Delegate
+# every other provider to it, then publish Codex through the local collector.
+packaged_updater=${AGENT_USAGE_PLUS_PACKAGED_UPDATER:-/usr/share/omarchy/bin/omarchy-agent-usage-update}
+codex_collector=${AGENT_USAGE_PLUS_CODEX_COLLECTOR:-"$HOME/.local/bin/omarchy-agent-usage-codex"}
+usage_dir=${XDG_STATE_HOME:-"$HOME/.local/state"}/omarchy/agents/usage
+
+args=("$@")
+only=()
+codex_excluded=false
+
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case ${args[$i]} in
+    --force | --limits-only) ;;
+    --except)
+      ((i += 1))
+      [[ ${args[$i]:-} == codex ]] && codex_excluded=true
+      ;;
+    *) only+=("${args[$i]}") ;;
+  esac
+done
+
+codex_wanted=true
+if $codex_excluded; then
+  codex_wanted=false
+elif ((${#only[@]} > 0)); then
+  codex_wanted=false
+  for agent in "${only[@]}"; do
+    [[ $agent == codex ]] && codex_wanted=true
+  done
+fi
+
+"$packaged_updater" --except codex "$@"
+
+if $codex_wanted; then
+  flags=()
+  for arg in "$@"; do
+    [[ $arg == --force || $arg == --limits-only ]] && flags+=("$arg")
+  done
+  record=$("$codex_collector" "${flags[@]}")
+  jq -e . >/dev/null <<<"$record"
+  mkdir -p "$usage_dir"
+  temporary=$(mktemp "$usage_dir/.codex.XXXXXX")
+  trap 'rm -f "$temporary"' EXIT
+  printf '%s\n' "$record" >"$temporary"
+  chmod 0600 "$temporary"
+  mv "$temporary" "$usage_dir/codex.json"
+  trap - EXIT
+fi

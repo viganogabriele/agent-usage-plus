@@ -79,8 +79,10 @@ compatibility override:
 omarchy agent usage-update --force codex
 ```
 
-It links only `~/.local/bin/omarchy-agent-usage-codex`, never edits
-`/usr/share/omarchy`, and refuses to replace another local override.
+It links `~/.local/bin/omarchy-agent-usage-codex` and the companion updater
+that the plugin prefers, never edits `/usr/share/omarchy`, and refuses to
+replace another local override. The updater delegates every provider except
+Codex to Omarchy's packaged command.
 
 ## Claude and Codex API-cost estimates
 
