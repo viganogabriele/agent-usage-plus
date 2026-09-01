@@ -19,6 +19,10 @@ Panel {
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
+  // Healthy quota gets a stable green so the meter reads as a traffic-light
+  // scale in every theme. Warn remains the intentionally fixed amber below;
+  // Critical continues to use Omarchy's live urgent color.
+  readonly property color healthy: "#22C55E"
   // A fixed amber rather than a foreground/urgent blend: warn needs to read
   // as its own distinct traffic-light color at a glance, not a paler shade
   // of critical that's easy to mistake for it against a dim theme.
@@ -260,7 +264,7 @@ Panel {
   function colorForSeverity(severity) {
     if (severity === "critical") return root.urgent
     if (severity === "warn") return root.warn
-    return root.foreground
+    return root.healthy
   }
 
   // A prepaid account runs low the way a subscription window fills up: the
