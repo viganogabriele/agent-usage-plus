@@ -407,6 +407,9 @@ Item {
   // collectors and internal threshold comparisons retain their canonical
   // used fractions so switching modes never changes when a warning fires.
   readonly property bool showAvailablePercentage: booleanSetting("showAvailablePercentage", false)
+  // Opt-in visual treatment only. Severity and notification transitions do
+  // not depend on this setting.
+  readonly property bool colorfulUsageMeters: booleanSetting("colorfulUsageMeters", false)
 
   readonly property var showInBarList: Aggregate.selectBarProviders(enabledProviders, settings)
   readonly property var barLayout: Aggregate.selectBarLayout(
@@ -583,6 +586,10 @@ Item {
 
   function setShowAvailablePercentage(value) {
     writeSetting("showAvailablePercentage", JSON.stringify(!!value))
+  }
+
+  function setColorfulUsageMeters(value) {
+    writeSetting("colorfulUsageMeters", JSON.stringify(!!value))
   }
 
   function setProviderBarRole(id, value) {

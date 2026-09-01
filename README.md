@@ -48,11 +48,12 @@ Requires Omarchy with Quickshell plugin support. The plugin has no other
 runtime dependency; optional collector setup is documented in
 [collectors/README.md](collectors/README.md).
 
-The widget follows Omarchy's live theme. Warn is fixed amber (`#F2B705`), and
-notifications are off by default; when enabled, each provider alerts once at
-Warn and once at Critical. The widget can optionally express quota as available
-instead of used; percentages, meters, warning controls, and alerts switch
-together while keeping the same underlying trigger points.
+The widget follows Omarchy's live theme. An optional traffic-light palette uses
+green, amber, and red for Healthy, Warn, and Critical meters. Notifications are
+off by default; when enabled, each provider alerts once at Warn and once at
+Critical. The widget can optionally express quota as available instead of used;
+percentages, meters, warning controls, and alerts switch together while keeping
+the same underlying trigger points.
 
 ![Available quota mode in Settings](preview-available.png)
 

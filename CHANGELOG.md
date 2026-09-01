@@ -8,9 +8,9 @@ All notable changes to this project are documented in this file. The format is b
 
 - An opt-in setting switches percentages, meters, warning controls, and alerts
   together from quota used to quota available without changing trigger points.
-- Color-coded quota meters in both the bar and panel: green while healthy,
-  amber at Warn, and the live theme critical color at Critical. Severity stays
-  usage-based when the meter is shown as available quota.
+- An opt-in traffic-light palette color-codes quota meters in both the bar and
+  panel: green while healthy, amber at Warn, and red at Critical. Severity
+  stays usage-based when the meter is shown as available quota.
 - OpenCode Go collector (`collectors/agent_usage_collectors/opencode_go.py`): reads
   local session/token stats from opencode's own SQLite store and the
   authoritative rolling/weekly/monthly allowances from Zen's usage endpoint,
@@ -61,7 +61,8 @@ All notable changes to this project are documented in this file. The format is b
 ### Notes
 
 - The interface follows Omarchy's live theme. Warn remains deliberately amber
-  (`#F2B705`); Critical uses the theme's urgent color.
+  (`#F2B705`); Critical uses the theme's urgent color unless the opt-in
+  traffic-light palette is enabled, where Critical is explicitly red.
 - This is a major release: the bar/panel interaction model, provider layout,
   optional collectors, notifications, details view, and settings workflow are
   substantially different from 1.x.

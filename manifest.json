@@ -75,6 +75,7 @@
       "syncDeviceId": "",
       "notificationsEnabled": false,
       "showAvailablePercentage": false,
+      "colorfulUsageMeters": false,
       "warnThresholdPct": 75,
       "criticalThresholdPct": 90,
       "historyDays": 30
@@ -147,6 +148,13 @@
         "label": "Show available quota",
         "defaultValue": false,
         "description": "Show quota available instead of quota used in percentages, meters, threshold controls, and alerts."
+      },
+      {
+        "key": "colorfulUsageMeters",
+        "type": "boolean",
+        "label": "Color-code quota meters",
+        "defaultValue": false,
+        "description": "Use a green, amber, and red traffic-light palette for healthy, Warn, and Critical quota meters."
       },
       {
         "key": "warnThresholdPct",

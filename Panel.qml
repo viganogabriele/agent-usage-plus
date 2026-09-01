@@ -10,6 +10,7 @@ import "logic/aggregate.js" as Aggregate
 import "logic/history.js" as History
 import "logic/pace.js" as Pace
 import "logic/notifications.js" as Notify
+import "logic/meter-colors.js" as MeterColors
 
 Panel {
   id: root
@@ -19,10 +20,11 @@ Panel {
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
-  // Healthy quota gets a stable green so the meter reads as a traffic-light
-  // scale in every theme. Warn remains the intentionally fixed amber below;
-  // Critical continues to use Omarchy's live urgent color.
+  // The stable traffic-light colors are opt-in. With the option off, healthy
+  // meters retain the live foreground and Critical retains Omarchy's urgent
+  // color, preserving the widget's original theme contract.
   readonly property color healthy: "#22C55E"
+  readonly property color colorfulCritical: "#EF4444"
   // A fixed amber rather than a foreground/urgent blend: warn needs to read
   // as its own distinct traffic-light color at a glance, not a paler shade
   // of critical that's easy to mistake for it against a dim theme.
@@ -262,9 +264,12 @@ Panel {
     return Thresholds.severityFor(percent * 100, root.severityThresholds)
   }
   function colorForSeverity(severity) {
-    if (severity === "critical") return root.urgent
-    if (severity === "warn") return root.warn
-    return root.healthy
+    var role = MeterColors.paletteRole(severity, usage.colorfulUsageMeters)
+    if (role === "critical-red") return root.colorfulCritical
+    if (role === "critical") return root.urgent
+    if (role === "warn") return root.warn
+    if (role === "healthy") return root.healthy
+    return root.foreground
   }
 
   // A prepaid account runs low the way a subscription window fills up: the
@@ -2670,15 +2675,16 @@ Panel {
                   }
                 }
 
-                // Keep both immediate preferences on one visible row. The
-                // available-quota setting previously pushed Notifications and
-                // Test just below the initial viewport, making them look gone.
+                // Keep every immediate preference on one visible row. Adding
+                // another toggle must not make Settings taller or introduce
+                // scrolling; each cell stays comfortably within the wide
+                // settings panel.
                 Grid {
                   id: preferenceGrid
                   width: parent.width
-                  columns: 2
-                  columnSpacing: Style.space(16)
-                  readonly property real cellWidth: Math.floor((width - columnSpacing) / 2)
+                  columns: 3
+                  columnSpacing: Style.space(12)
+                  readonly property real cellWidth: Math.floor((width - columnSpacing * 2) / 3)
 
                   Row {
                     width: preferenceGrid.cellWidth
@@ -2694,7 +2700,28 @@ Panel {
 
                     Text {
                       anchors.verticalCenter: parent.verticalCenter
-                      text: "Show available instead of used quota"
+                      text: "Show available quota"
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                  }
+
+                  Row {
+                    width: preferenceGrid.cellWidth
+                    spacing: Style.space(6)
+
+                    ToggleSwitch {
+                      anchors.verticalCenter: parent.verticalCenter
+                      checked: usage.colorfulUsageMeters
+                      foreground: root.foreground
+                      accent: Color.accent
+                      onToggled: usage.setColorfulUsageMeters(!usage.colorfulUsageMeters)
+                    }
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: "Color-code meters"
                       color: root.foreground
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.bodySmall
@@ -2703,10 +2730,10 @@ Panel {
 
                   // Notifications are opt-in and fire once at each threshold,
                   // not on every refresh. Test remains independent of the
-                  // toggle and now reports its process result beside the button.
+                  // toggle and reports its process result beside the button.
                   Row {
                     width: preferenceGrid.cellWidth
-                    spacing: Style.space(8)
+                    spacing: Style.space(6)
 
                     ToggleSwitch {
                       anchors.verticalCenter: parent.verticalCenter
@@ -2718,7 +2745,7 @@ Panel {
 
                     Text {
                       anchors.verticalCenter: parent.verticalCenter
-                      text: "Warn/Critical notifications"
+                      text: "Threshold alerts"
                       color: root.foreground
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.bodySmall
@@ -2748,7 +2775,7 @@ Panel {
 
                 Text {
                   width: parent.width
-                  text: "Available mode switches percentages, meters, and warning values together. Alerts remain opt-in and fire once per threshold crossing."
+                  text: "Available mode switches percentages, meters, and warning values together. Meter colors are optional; alerts remain opt-in."
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
