@@ -9,6 +9,7 @@ import "logic/format.js" as Format
 import "logic/aggregate.js" as Aggregate
 import "logic/history.js" as History
 import "logic/pace.js" as Pace
+import "logic/notifications.js" as Notify
 
 Panel {
   id: root
@@ -777,6 +778,11 @@ Panel {
     function toggle(): void { root.toggle() }
     function refresh(): string { root.refreshNow(); return "ok" }
     function next(): string { root.selectProvider(root.providerIndex + 1); return "ok" }
+    // Exposed for the same reason as refresh(): it gives diagnostics and
+    // release QA a deterministic path through the exact function the button
+    // calls, including its queue and visible result state.
+    function testNotification(): string { root.sendTestNotification(); return "queued" }
+    function notificationStatus(): string { return root.notificationTestStatus }
   }
 
   // The provider's primary window: session when it reports one (Claude),
@@ -839,8 +845,17 @@ Panel {
     target: usage
     function onNotificationsEnabledChanged() {
       if (usage.notificationsEnabled) root.checkThresholdNotifications()
-      else root.notificationQueue = []
+      else root.discardQueuedThresholdNotifications()
     }
+  }
+
+  function discardQueuedThresholdNotifications() {
+    var tests = []
+    for (var i = 0; i < root.notificationQueue.length; i++) {
+      var entry = root.notificationQueue[i]
+      if (entry && entry.isTest === true) tests.push(entry)
+    }
+    root.notificationQueue = tests
   }
 
   function notificationSignal(p) {
@@ -875,13 +890,18 @@ Panel {
 
   property var notificationQueue: []
   property bool notificationRunning: false
+  property bool activeNotificationIsTest: false
+  property string notificationTestStatus: ""
 
   Process {
     id: notifyProcess
     running: false
     onExited: function(exitCode) {
+      if (root.activeNotificationIsTest)
+        root.notificationTestStatus = exitCode === 0 ? "Sent" : "Failed"
       if (exitCode !== 0)
-        console.warn("agents/notify", "notify-send failed:", notifyProcess.command.join(" "))
+        console.warn("agents/notify", "notification command failed:", notifyProcess.command.join(" "))
+      root.activeNotificationIsTest = false
       root.notificationRunning = false
       root.pumpNotificationQueue()
     }
@@ -892,12 +912,16 @@ Panel {
     }
   }
 
-  // A manual, always-available way to confirm the notify-send pipeline
+  // A manual, always-available way to confirm Omarchy's notification pipeline
   // itself works — independent of notificationsEnabled and of waiting for a
   // real Warn/Critical crossing, which may be rare or slow to hit.
   function sendTestNotification() {
-    root.notificationQueue.push(["notify-send", "--app-name=Agent Usage Plus", "--urgency=normal",
-      "Agent Usage Plus", "Test notification — if you see this, notifications are working."])
+    root.notificationTestStatus = root.notificationRunning ? "Queued…" : "Sending…"
+    root.notificationQueue.push({
+      command: Notify.command("Agent Usage Plus",
+        "Test notification — if you see this, notifications are working.", "normal"),
+      isTest: true
+    })
     root.pumpNotificationQueue()
   }
 
@@ -908,7 +932,10 @@ Panel {
     var summary = name + " — " + (severity === "critical" ? "critical" : "warning")
     var body = signal.title + " at " + pct
       + (usage.showAvailablePercentage ? " available" : " used")
-    root.notificationQueue.push(["notify-send", "--app-name=Agent Usage Plus", "--urgency=" + urgency, summary, body])
+    root.notificationQueue.push({
+      command: Notify.command(summary, body, urgency),
+      isTest: false
+    })
     root.pumpNotificationQueue()
   }
 
@@ -916,8 +943,11 @@ Panel {
     if (root.notificationRunning) return
     if (root.notificationQueue.length === 0) return
     var next = root.notificationQueue.shift()
+    if (!next || !Array.isArray(next.command)) return root.pumpNotificationQueue()
     root.notificationRunning = true
-    notifyProcess.command = next
+    root.activeNotificationIsTest = next.isTest === true
+    if (root.activeNotificationIsTest) root.notificationTestStatus = "Sending…"
+    notifyProcess.command = next.command
     notifyProcess.running = true
   }
 
@@ -2636,72 +2666,89 @@ Panel {
                   }
                 }
 
-                // Presentation preference only: stored records and threshold
-                // comparisons remain usage-based, while the complete UI is
-                // complemented into available-quota terms.
-                Row {
-                  spacing: Style.space(10)
+                // Keep both immediate preferences on one visible row. The
+                // available-quota setting previously pushed Notifications and
+                // Test just below the initial viewport, making them look gone.
+                Grid {
+                  id: preferenceGrid
+                  width: parent.width
+                  columns: 2
+                  columnSpacing: Style.space(16)
+                  readonly property real cellWidth: Math.floor((width - columnSpacing) / 2)
 
-                  ToggleSwitch {
-                    anchors.verticalCenter: parent.verticalCenter
-                    checked: usage.showAvailablePercentage
-                    foreground: root.foreground
-                    accent: Color.accent
-                    onToggled: usage.setShowAvailablePercentage(!usage.showAvailablePercentage)
+                  Row {
+                    width: preferenceGrid.cellWidth
+                    spacing: Style.space(10)
+
+                    ToggleSwitch {
+                      anchors.verticalCenter: parent.verticalCenter
+                      checked: usage.showAvailablePercentage
+                      foreground: root.foreground
+                      accent: Color.accent
+                      onToggled: usage.setShowAvailablePercentage(!usage.showAvailablePercentage)
+                    }
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: "Show available instead of used quota"
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
                   }
 
-                  Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "Show available instead of used quota"
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
+                  // Notifications are opt-in and fire once at each threshold,
+                  // not on every refresh. Test remains independent of the
+                  // toggle and now reports its process result beside the button.
+                  Row {
+                    width: preferenceGrid.cellWidth
+                    spacing: Style.space(8)
+
+                    ToggleSwitch {
+                      anchors.verticalCenter: parent.verticalCenter
+                      checked: usage.notificationsEnabled
+                      foreground: root.foreground
+                      accent: Color.accent
+                      onToggled: usage.setNotificationsEnabled(!usage.notificationsEnabled)
+                    }
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: "Warn/Critical notifications"
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+
+                    Button {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: "Test"
+                      tooltipText: "Send one notification now — independent of the notification toggle."
+                      bordered: true
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.caption
+                      verticalPadding: Style.space(4)
+                      onClicked: root.sendTestNotification()
+                    }
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: root.notificationTestStatus
+                      color: text === "Failed" ? root.urgent : root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
                   }
                 }
 
                 Text {
                   width: parent.width
-                  text: "Percentages, meters, warning levels, and alerts switch together; stored limits remain usage-based."
+                  text: "Available mode switches percentages, meters, and warning values together. Alerts remain opt-in and fire once per threshold crossing."
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   wrapMode: Text.WordWrap
-                }
-
-                // Notifications (opt-in, off by default) — a single
-                // system notification the moment a provider first crosses
-                // Warn or Critical, not a repeat every refresh. See
-                // checkThresholdNotifications() in this file.
-                Row {
-                  spacing: Style.space(10)
-
-                  ToggleSwitch {
-                    anchors.verticalCenter: parent.verticalCenter
-                    checked: usage.notificationsEnabled
-                    foreground: root.foreground
-                    accent: Color.accent
-                    onToggled: usage.setNotificationsEnabled(!usage.notificationsEnabled)
-                  }
-
-                  Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "Notify when a provider crosses Warn or Critical"
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                  }
-
-                  Button {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "Test"
-                    tooltipText: "Send one notification now, to confirm your system shows it — independent of the toggle above."
-                    bordered: true
-                    foreground: root.foreground
-                    fontFamily: root.fontFamily
-                    fontSize: Style.font.caption
-                    verticalPadding: Style.space(4)
-                    onClicked: root.sendTestNotification()
-                  }
                 }
               }
             }

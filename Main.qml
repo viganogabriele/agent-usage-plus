@@ -401,7 +401,7 @@ Item {
 
   // Off by default: a notification is an interruption, and nobody asked for
   // one just by installing the widget. See Panel.qml for the actual
-  // threshold-crossing watch and the notify-send dispatch queue.
+  // threshold-crossing watch and Omarchy notification dispatch queue.
   readonly property bool notificationsEnabled: booleanSetting("notificationsEnabled", false)
   // Presentation only: the UI may show the available complement, while
   // collectors and internal threshold comparisons retain their canonical

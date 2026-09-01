@@ -49,7 +49,8 @@ Automated tests cover extracted logic and record validation. They cannot show cl
 
 ## Notifications
 
-- [ ] With Notifications off (default), no `notify-send` fires no matter how high usage climbs.
+- [ ] With Notifications off (default), no automatic notification fires no matter how high usage climbs. Test remains available and independent of this toggle.
+- [ ] Click Test with DND off: the popup appears, the adjacent state advances through Sending… to Sent, and a new matching entry appears in Omarchy's notification history. A transport failure must show Failed instead of silently doing nothing.
 - [ ] With Notifications on, a provider crossing Warn produces exactly one notification, and crossing Critical produces exactly one more — not a repeat on every refresh while it stays above the line.
 - [ ] After the window resets (or on the next billing/session period), the same provider crossing Warn again produces a new notification.
 - [ ] Restarting the shell while a provider is already above a threshold does not replay that alert; it must first drop below the threshold and cross it again.

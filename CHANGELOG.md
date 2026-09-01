@@ -39,6 +39,9 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- Notification Test and threshold alerts now use Omarchy's supported D-Bus
+  sender instead of `notify-send`; Test reports Sending, Sent, or Failed, and
+  the notification controls remain visible beside the available-quota option.
 - Bar and panel provider order now stay aligned after Fixed/Cycle selection and
   drag reordering.
 - Provider marks in the bar follow the live bar foreground, including hover and
