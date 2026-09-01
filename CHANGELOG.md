@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- An opt-in setting switches percentages, meters, warning controls, and alerts
+  together from quota used to quota available without changing trigger points.
 - OpenCode Go collector (`collectors/agent_usage_collectors/opencode_go.py`): reads
   local session/token stats from opencode's own SQLite store and the
   authoritative rolling/weekly/monthly allowances from Zen's usage endpoint,

@@ -43,6 +43,7 @@ Automated tests cover extracted logic and record validation. They cannot show cl
 - [ ] Mark a provider Cycle and verify the rotating-slot count and interval
   appear. Both values must stay within their stated limits.
 - [ ] Change refresh interval and warn/critical thresholds, click Save, then confirm values survive `omarchy restart shell`. Settings must apply without a restart because the panel writes via `omarchy bar set`, not directly to `shell.json`.
+- [ ] Toggle "Show available instead of used quota": a 13% usage label and meter become 87% available in both the bar and limit rows, while Warn/Critical colors still trigger at the same real quota levels. Threshold controls complement automatically (75/90 used becomes 25/10 available), notifications say "available", the setting survives `omarchy restart shell`, and disabling it restores usage terms.
 - [ ] Confirm an invalid externally-written threshold pair (`warn >= critical`) never crashes the panel; it should skip the warn band until the pair is corrected.
 - [ ] Edit a Behaviour field (e.g. type a new Warn value) without clicking Save, then toggle an unrelated switch (a provider's Enabled/Bar slot, or Notifications) — the in-progress edit and the "Unsaved changes" label must survive; the field must not snap back to its old value. Save commits every changed field in one go; closing and reopening Settings without saving discards the draft back to the live value.
 

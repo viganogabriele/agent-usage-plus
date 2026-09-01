@@ -74,6 +74,7 @@
       "syncFileName": "",
       "syncDeviceId": "",
       "notificationsEnabled": false,
+      "showAvailablePercentage": false,
       "warnThresholdPct": 75,
       "criticalThresholdPct": 90,
       "historyDays": 30
@@ -139,6 +140,13 @@
         "label": "Device id",
         "defaultValue": "",
         "description": "Optional stable device name used inside synced aggregate snapshots."
+      },
+      {
+        "key": "showAvailablePercentage",
+        "type": "boolean",
+        "label": "Show available quota",
+        "defaultValue": false,
+        "description": "Show quota available instead of quota used in percentages, meters, threshold controls, and alerts."
       },
       {
         "key": "warnThresholdPct",

@@ -13,11 +13,21 @@ function formatTokenCount(n) {
   return String(n)
 }
 
-// A valid (>= 0) percent as a whole-number string, e.g. 0.5 -> "50%". Callers
-// decide what to show for a negative/unknown percent (Panel.qml uses "…" for
-// the bar and "—" for a limit row), since that fallback differs by call site.
-function formatPercent(percent) {
-  return Math.round(percent * 100) + "%"
+// Converts the provider's canonical used fraction into whichever fraction the
+// interface is currently presenting. Keep this separate from threshold logic:
+// severity always classifies usage, even when meters run down toward zero.
+function displayPercent(percent, showAvailable) {
+  return showAvailable === true ? 1 - percent : percent
+}
+
+// A valid (>= 0) usage fraction as a whole-number string, e.g. 0.5 -> "50%".
+// When showAvailable is true, complement the already-rounded usage value so
+// the two display modes always add up to exactly 100 (13% used / 87%
+// available). Callers decide what to show for a negative/unknown percent,
+// since that fallback differs by call site.
+function formatPercent(percent, showAvailable) {
+  var used = Math.round(percent * 100)
+  return (showAvailable === true ? 100 - used : used) + "%"
 }
 
 function formatDuration(ms) {
@@ -104,6 +114,7 @@ function friendlyModelName(id) {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     formatTokenCount: formatTokenCount,
+    displayPercent: displayPercent,
     formatPercent: formatPercent,
     formatDuration: formatDuration,
     currencyPrefix: currencyPrefix,

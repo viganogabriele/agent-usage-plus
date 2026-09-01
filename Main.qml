@@ -403,6 +403,10 @@ Item {
   // one just by installing the widget. See Panel.qml for the actual
   // threshold-crossing watch and the notify-send dispatch queue.
   readonly property bool notificationsEnabled: booleanSetting("notificationsEnabled", false)
+  // Presentation only: the UI may show the available complement, while
+  // collectors and internal threshold comparisons retain their canonical
+  // used fractions so switching modes never changes when a warning fires.
+  readonly property bool showAvailablePercentage: booleanSetting("showAvailablePercentage", false)
 
   readonly property var showInBarList: Aggregate.selectBarProviders(enabledProviders, settings)
   readonly property var barLayout: Aggregate.selectBarLayout(
@@ -575,6 +579,10 @@ Item {
 
   function setNotificationsEnabled(value) {
     writeSetting("notificationsEnabled", JSON.stringify(!!value))
+  }
+
+  function setShowAvailablePercentage(value) {
+    writeSetting("showAvailablePercentage", JSON.stringify(!!value))
   }
 
   function setProviderBarRole(id, value) {

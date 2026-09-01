@@ -140,6 +140,10 @@ Panel {
   // read straight from the manifest schema's defaults when unset.
   readonly property int warnThresholdPct: Number(usage.setting("warnThresholdPct", Thresholds.DEFAULT_WARN_PCT))
   readonly property int criticalThresholdPct: Number(usage.setting("criticalThresholdPct", Thresholds.DEFAULT_CRITICAL_PCT))
+  readonly property int displayWarnThresholdPct: usage.showAvailablePercentage
+    ? 100 - warnThresholdPct : warnThresholdPct
+  readonly property int displayCriticalThresholdPct: usage.showAvailablePercentage
+    ? 100 - criticalThresholdPct : criticalThresholdPct
   readonly property var severityThresholds: ({ warn: warnThresholdPct, critical: criticalThresholdPct })
 
   // ---------------------------------------------------------------- settings
@@ -796,7 +800,10 @@ Panel {
   function providerSeverity(p) { return root.severityForPercent(providerPercent(p)) }
   function providerPercentText(p) {
     var pct = providerPercent(p)
-    return pct >= 0 ? Format.formatPercent(pct) : "…"
+    return pct >= 0 ? Format.formatPercent(pct, usage.showAvailablePercentage) : "…"
+  }
+  function displayPercent(percent) {
+    return Format.displayPercent(percent, usage.showAvailablePercentage)
   }
 
   // The weekly percent, when the bar's already showing session as the
@@ -900,6 +907,7 @@ Panel {
     var urgency = severity === "critical" ? "critical" : "normal"
     var summary = name + " — " + (severity === "critical" ? "critical" : "warning")
     var body = signal.title + " at " + pct
+      + (usage.showAvailablePercentage ? " available" : " used")
     root.notificationQueue.push(["notify-send", "--app-name=Agent Usage Plus", "--urgency=" + urgency, summary, body])
     root.pumpNotificationQueue()
   }
@@ -1100,8 +1108,14 @@ Panel {
           CheckpointMeter {
             anchors.verticalCenter: parent.verticalCenter
             width: Style.space(48)
-            value: root.providerPercent(providerGroup.modelData)
-            secondaryValue: root.providerSecondaryPercent(providerGroup.modelData)
+            value: {
+              var percent = root.providerPercent(providerGroup.modelData)
+              return percent >= 0 ? root.displayPercent(percent) : -1
+            }
+            secondaryValue: {
+              var percent = root.providerSecondaryPercent(providerGroup.modelData)
+              return percent >= 0 ? root.displayPercent(percent) : -1
+            }
             severity: root.providerSeverity(providerGroup.modelData)
             visible: root.providerSettingLabelMode(providerGroup.modelData.providerId) === "full"
               && root.providerPercent(providerGroup.modelData) >= 0
@@ -2431,35 +2445,58 @@ Panel {
                 property int draftCycleSlots: usage.barCycleSlots
                 property int draftCycleIntervalSec: usage.barCycleIntervalSec
                 property int draftRefreshIntervalSec: usage.refreshIntervalSec
-                property int draftWarnThresholdPct: root.warnThresholdPct
-                property int draftCriticalThresholdPct: root.criticalThresholdPct
+                property int draftWarnThresholdPct: root.displayWarnThresholdPct
+                property int draftCriticalThresholdPct: root.displayCriticalThresholdPct
+                property bool draftShowsAvailable: usage.showAvailablePercentage
 
                 readonly property bool settingsDirty: draftCycleSlots !== usage.barCycleSlots
                   || draftCycleIntervalSec !== usage.barCycleIntervalSec
                   || draftRefreshIntervalSec !== usage.refreshIntervalSec
-                  || draftWarnThresholdPct !== root.warnThresholdPct
-                  || draftCriticalThresholdPct !== root.criticalThresholdPct
+                  || draftWarnThresholdPct !== root.displayWarnThresholdPct
+                  || draftCriticalThresholdPct !== root.displayCriticalThresholdPct
 
-                // A warn band at or above critical collapses to nothing
-                // meaningful (severityFor's own guard silently favors
-                // critical) — catch it here instead, before Save, where a
-                // person editing the number can actually see why it's stuck.
-                readonly property bool draftThresholdsValid: draftWarnThresholdPct < draftCriticalThresholdPct
+                // In used terms Warn must be below Critical; complementing
+                // both values reverses that ordering in available terms.
+                // Catch either invalid form before Save, where the person
+                // editing the number can see why it is stuck.
+                readonly property bool draftThresholdsValid: draftShowsAvailable
+                  ? draftWarnThresholdPct > draftCriticalThresholdPct
+                  : draftWarnThresholdPct < draftCriticalThresholdPct
 
                 function resyncDrafts() {
                   draftCycleSlots = usage.barCycleSlots
                   draftCycleIntervalSec = usage.barCycleIntervalSec
                   draftRefreshIntervalSec = usage.refreshIntervalSec
-                  draftWarnThresholdPct = root.warnThresholdPct
-                  draftCriticalThresholdPct = root.criticalThresholdPct
+                  draftWarnThresholdPct = root.displayWarnThresholdPct
+                  draftCriticalThresholdPct = root.displayCriticalThresholdPct
+                  draftShowsAvailable = usage.showAvailablePercentage
+                }
+
+                // Preserve every in-progress draft when the presentation mode
+                // changes. Only complement the two threshold fields in place;
+                // resyncDrafts() would incorrectly discard unrelated edits.
+                function syncPercentageMode() {
+                  if (draftShowsAvailable === usage.showAvailablePercentage) return
+                  draftWarnThresholdPct = 100 - draftWarnThresholdPct
+                  draftCriticalThresholdPct = 100 - draftCriticalThresholdPct
+                  draftShowsAvailable = usage.showAvailablePercentage
                 }
 
                 function saveDrafts() {
                   usage.setBarCycleSlots(draftCycleSlots)
                   usage.setBarCycleIntervalSec(draftCycleIntervalSec)
                   usage.setRefreshIntervalSec(draftRefreshIntervalSec)
-                  usage.setWarnThresholdPct(draftWarnThresholdPct)
-                  usage.setCriticalThresholdPct(draftCriticalThresholdPct)
+                  usage.setWarnThresholdPct(draftShowsAvailable
+                    ? 100 - draftWarnThresholdPct : draftWarnThresholdPct)
+                  usage.setCriticalThresholdPct(draftShowsAvailable
+                    ? 100 - draftCriticalThresholdPct : draftCriticalThresholdPct)
+                }
+
+                Connections {
+                  target: usage
+                  function onShowAvailablePercentageChanged() {
+                    behaviourContent.syncPercentageMode()
+                  }
                 }
 
                 Text {
@@ -2525,7 +2562,7 @@ Panel {
 
                   NumberField {
                     width: behaviourGrid.cellWidth
-                    label: "Warn (%)"
+                    label: behaviourContent.draftShowsAvailable ? "Warn avail. (%)" : "Warn used (%)"
                     value: behaviourContent.draftWarnThresholdPct
                     from: 1
                     to: 99
@@ -2538,10 +2575,10 @@ Panel {
 
                   NumberField {
                     width: behaviourGrid.cellWidth
-                    label: "Critical (%)"
+                    label: behaviourContent.draftShowsAvailable ? "Critical avail. (%)" : "Critical used (%)"
                     value: behaviourContent.draftCriticalThresholdPct
-                    from: 1
-                    to: 100
+                    from: behaviourContent.draftShowsAvailable ? 0 : 1
+                    to: behaviourContent.draftShowsAvailable ? 99 : 100
                     stepSize: 1
                     foreground: root.foreground
                     accent: root.urgent
@@ -2556,8 +2593,12 @@ Panel {
                   // between the normal hint and the validation error so nothing
                   // below it jumps when Warn/Critical cross each other.
                   text: behaviourContent.draftThresholdsValid
-                    ? "Warn colors the meter early; Critical marks it urgent. Type an exact value or use the arrows, then Save applies all five fields above together."
-                    : "Warn must be lower than Critical — Save is disabled until that's fixed."
+                    ? (behaviourContent.draftShowsAvailable
+                      ? "Warn when available quota falls this low; Critical marks the lower urgent level. Type an exact value or use the arrows, then Save applies all five fields above together."
+                      : "Warn colors the meter early; Critical marks it urgent. Type an exact value or use the arrows, then Save applies all five fields above together.")
+                    : (behaviourContent.draftShowsAvailable
+                      ? "Warn availability must be higher than Critical — Save is disabled until that's fixed."
+                      : "Warn usage must be lower than Critical — Save is disabled until that's fixed.")
                   color: behaviourContent.draftThresholdsValid ? root.dim : root.urgent
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -2593,6 +2634,38 @@ Panel {
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                   }
+                }
+
+                // Presentation preference only: stored records and threshold
+                // comparisons remain usage-based, while the complete UI is
+                // complemented into available-quota terms.
+                Row {
+                  spacing: Style.space(10)
+
+                  ToggleSwitch {
+                    anchors.verticalCenter: parent.verticalCenter
+                    checked: usage.showAvailablePercentage
+                    foreground: root.foreground
+                    accent: Color.accent
+                    onToggled: usage.setShowAvailablePercentage(!usage.showAvailablePercentage)
+                  }
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Show available instead of used quota"
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+
+                Text {
+                  width: parent.width
+                  text: "Percentages, meters, warning levels, and alerts switch together; stored limits remain usage-based."
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
                 }
 
                 // Notifications (opt-in, off by default) — a single
@@ -2686,7 +2759,7 @@ Panel {
       Text {
         id: limitValue
         text: limitRow.window && limitRow.window.percent >= 0
-          ? Format.formatPercent(limitRow.window.percent)
+          ? Format.formatPercent(limitRow.window.percent, usage.showAvailablePercentage)
           : "n/a"
         color: root.foreground
         font.family: root.fontFamily
@@ -2698,7 +2771,8 @@ Panel {
 
     Meter {
       width: parent.width
-      value: limitRow.window ? limitRow.window.percent : -1
+      value: limitRow.window && limitRow.window.percent >= 0
+        ? root.displayPercent(limitRow.window.percent) : -1
       severity: limitRow.severity
     }
 
