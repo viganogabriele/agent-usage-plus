@@ -618,12 +618,6 @@ Panel {
     return row && row.hasCost ? root.formatUsd(row.estimateUsd) : "—"
   }
 
-  function costApiHint(row) {
-    if (!row || !row.hasCost) return "No pricing data"
-    if (row.incomplete) return "Partial estimate"
-    return "API rate estimate"
-  }
-
   // Combines the two small-print footer lines (price-catalogue coverage and
   // version) into one so the model breakdown doesn't end in a stack of
   // near-identical caption rows.
@@ -2258,7 +2252,10 @@ Panel {
               id: costValueCard
               visible: !!root.provider
               width: parent.width
-              implicitHeight: costValueContent.implicitHeight + Style.space(28)
+              // Give this information-dense card the same generous breathing
+              // room as the provider overview above it. The extra vertical
+              // space improves scanability without hiding any analytics.
+              implicitHeight: costValueContent.implicitHeight + Style.space(36)
               color: root.alpha(root.foreground, 0.035)
               borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
               radius: Style.cornerRadius
@@ -2268,9 +2265,9 @@ Panel {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                anchors.leftMargin: Style.space(14)
-                anchors.rightMargin: Style.space(14)
-                spacing: Style.space(10)
+                anchors.leftMargin: Style.space(18)
+                anchors.rightMargin: Style.space(18)
+                spacing: Style.space(14)
 
                 PanelSectionHeader {
                   width: parent.width
@@ -2300,7 +2297,7 @@ Panel {
                 Row {
                   id: costMetrics
                   width: parent.width
-                  spacing: Style.space(8)
+                  spacing: Style.space(14)
 
                   CostMetric {
                     width: (costMetrics.width - costMetrics.spacing * 2) / 3
@@ -2313,7 +2310,10 @@ Panel {
                     width: (costMetrics.width - costMetrics.spacing * 2) / 3
                     valueText: root.cost ? root.formatUsd(root.cost.estimateUsd) : "—"
                     label: "If billed by API"
-                    hint: root.costApiHint(root.costProviderRow(root.provider))
+                    // The disclosure above already explains the estimate;
+                    // repeating "published-rate" in this small tile adds
+                    // noise without adding information.
+                    hint: ""
                   }
 
                   CostMetric {
@@ -2330,7 +2330,7 @@ Panel {
                   id: costDailyBlock
                   visible: !!root.cost && root.costDailyRows.length > 0
                   width: parent.width
-                  spacing: Style.space(6)
+                  spacing: Style.space(10)
 
                   PanelSectionHeader {
                     width: parent.width
@@ -2357,7 +2357,7 @@ Panel {
                     id: costDailyChart
                     visible: root.costDailyRows.length > 0
                     width: parent.width
-                    height: Style.space(154)
+                    height: Style.space(166)
 
                     readonly property real axisLeft: Style.space(48)
                     readonly property real axisRight: Style.space(8)
@@ -2476,7 +2476,7 @@ Panel {
                   id: costModelChart
                   visible: root.costModelRows.length > 0
                   width: parent.width
-                  spacing: Style.space(6)
+                  spacing: Style.space(10)
 
                   PanelSectionHeader {
                     width: parent.width
@@ -2492,7 +2492,7 @@ Panel {
                       id: costModelRow
                       required property var modelData
                       width: costModelChart.width
-                      height: Style.space(38)
+                      height: Style.space(44)
 
                       Text {
                         id: costModelName

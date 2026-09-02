@@ -27,6 +27,14 @@ function readDetailModelSection() {
   return source.slice(start, end)
 }
 
+function readSelectedCostCard() {
+  const source = fs.readFileSync(panel, "utf8")
+  const start = source.indexOf("id: costValueCard")
+  const end = source.indexOf("// ---------- Usage ----------", start)
+  assert.ok(start >= 0 && end > start, "selected cost card block should be present")
+  return source.slice(start, end)
+}
+
 function executable(file, body) {
   fs.writeFileSync(file, `#!/usr/bin/env bash\nset -euo pipefail\n${body}\n`, { mode: 0o755 })
 }
@@ -75,6 +83,17 @@ test("expanded cost details include provider, daily, and model analytics", () =>
   assert.match(source, /id: costModelChart/)
   assert.match(source, /model: root\.costProviderRows/)
   assert.match(source, /id: costValueCard/)
+})
+
+test("selected cost details use the spacious card rhythm", () => {
+  const source = readSelectedCostCard()
+
+  assert.match(source, /implicitHeight: costValueContent\.implicitHeight \+ Style\.space\(36\)/)
+  assert.match(source, /anchors\.leftMargin: Style\.space\(18\)/)
+  assert.match(source, /anchors\.rightMargin: Style\.space\(18\)/)
+  assert.match(source, /id: costMetrics[\s\S]*?spacing: Style\.space\(14\)/)
+  assert.match(source, /id: costModelRow[\s\S]*?height: Style\.space\(44\)/)
+  assert.doesNotMatch(source, /costApiHint\(/)
 })
 
 test("cost average uses the provider's recorded days when collectors omit byDay", () => {
