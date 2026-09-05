@@ -1599,18 +1599,6 @@ Panel {
                 spacing: Style.space(6)
 
                 PanelActionButton {
-                  iconText: "󰑐"
-                  tooltipText: "Refresh usage now (r)"
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  size: Style.space(28)
-                  fontSize: Style.font.body
-                  bordered: true
-                  focusable: true
-                  onClicked: root.refreshNow()
-                }
-
-                PanelActionButton {
                   iconText: root.settingsOpen ? "󰁍" : "󰒓"
                   tooltipText: root.settingsOpen ? "Back to usage (s)" : "Settings (s)"
                   foreground: root.foreground
