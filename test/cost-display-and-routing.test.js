@@ -44,9 +44,9 @@ test("panel keeps estimated API cost out of compact view", () => {
   assert.match(source, /id: costSection/)
   assert.match(source, /visible:\s*root\.expanded\s*&&\s*!root\.settingsOpen/)
   assert.match(source, /root\.costProviderRows\.length/)
-  assert.match(source, /text: "Plan vs API"/)
+  assert.match(source, /text: "All providers"/)
   assert.match(source, /return "On subscription"/)
-  assert.match(source, /label: "If billed by API"/)
+  assert.match(source, /label: "API equivalent"/)
   assert.match(source, /root\.cost\.estimateUsd/)
 })
 
@@ -63,18 +63,19 @@ test("panel guards optional cost values before evaluating a hidden card", () => 
   assert.doesNotMatch(source, /text:\s*root\.cost\.incomplete\b/)
   assert.doesNotMatch(source, /color:\s*root\.cost\.incomplete\b/)
   assert.doesNotMatch(source, /text:\s*root\.formatUsd\(root\.cost\.estimateUsd\)/)
-  assert.match(source, /!root\.cost\s*\|\|\s*root\.cost\.incomplete/)
+  assert.match(source, /visible:\s*!!root\.provider/)
+  assert.match(source, /text:\s*!root\.cost/)
   assert.match(source, /root\.cost\s*\?\s*root\.formatUsd\(root\.cost\.estimateUsd\)\s*:\s*"—"/)
 })
 
 test("panel displays the collector cost period next to the estimate", () => {
-  assert.match(readCostCard(), /"Plan vs API"\s*\+\s*\(root\.cost\s*&&\s*root\.cost\.period/)
+  assert.match(readCostCard(), /"API equivalent"\s*\+\s*\(root\.cost\s*&&\s*root\.cost\.period/)
 })
 
 test("cost details keep the partial disclosure neutral and singular", () => {
   const source = readCostCard()
   assert.doesNotMatch(source, /color:\s*root\.warn/)
-  assert.doesNotMatch(source, /API USD is a published-rate estimate, not subscription billing\./)
+  assert.match(source, /Published API-rate equivalent · not subscription billing\./)
   assert.match(source, /Partial estimate/)
 })
 
