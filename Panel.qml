@@ -1591,6 +1591,18 @@ Panel {
                 spacing: Style.space(6)
 
                 PanelActionButton {
+                  iconText: "󰑐"
+                  tooltipText: "Refresh usage now (r)"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  size: Style.space(28)
+                  fontSize: Style.font.body
+                  bordered: true
+                  focusable: true
+                  onClicked: root.refreshNow()
+                }
+
+                PanelActionButton {
                   iconText: root.settingsOpen ? "󰁍" : "󰒓"
                   tooltipText: root.settingsOpen ? "Back to usage (s)" : "Settings (s)"
                   foreground: root.foreground
@@ -1823,7 +1835,7 @@ Panel {
           Text {
             visible: providerSwitch.visible
             width: parent.width
-            text: "Drag to reorder"
+            text: root.providers.length + " providers · drag marks to reorder"
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

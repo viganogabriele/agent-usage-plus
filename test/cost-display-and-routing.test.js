@@ -50,6 +50,14 @@ test("panel keeps estimated API cost out of compact view", () => {
   assert.match(source, /root\.cost\.estimateUsd/)
 })
 
+test("panel exposes refresh and provider-ordering affordances", () => {
+  const source = fs.readFileSync(panel, "utf8")
+
+  assert.match(source, /tooltipText: "Refresh usage now \(r\)"/)
+  assert.match(source, /onClicked: root\.refreshNow\(\)/)
+  assert.match(source, /providers · drag marks to reorder/)
+})
+
 test("panel guards optional cost values before evaluating a hidden card", () => {
   const source = readCostCard()
   assert.doesNotMatch(source, /text:\s*root\.cost\.incomplete\b/)
