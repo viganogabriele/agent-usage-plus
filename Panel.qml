@@ -1532,8 +1532,7 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if (t === "r" || t === "R") root.refreshNow()
-        else if (t === "e" || t === "E") root.toggleExpanded()
+        if (t === "e" || t === "E") root.toggleExpanded()
         else if (t === "s" || t === "S") root.toggleSettings()
       }
 
