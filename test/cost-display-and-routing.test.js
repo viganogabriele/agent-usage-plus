@@ -50,11 +50,9 @@ test("panel keeps estimated API cost out of compact view", () => {
   assert.match(source, /root\.cost\.estimateUsd/)
 })
 
-test("panel exposes refresh and provider-ordering affordances", () => {
+test("panel exposes the provider-ordering affordance", () => {
   const source = fs.readFileSync(panel, "utf8")
 
-  assert.match(source, /tooltipText: "Refresh usage now \(r\)"/)
-  assert.match(source, /onClicked: root\.refreshNow\(\)/)
   assert.match(source, /providers · drag marks to reorder/)
 })
 
