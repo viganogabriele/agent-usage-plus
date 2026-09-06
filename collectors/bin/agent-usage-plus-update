@@ -31,7 +31,14 @@ for ((index = 0; index < ${#args[@]}; index++)); do
   esac
 done
 
-devin_wanted=true
+# Auto-detect from the same local files the Devin collector uses.
+data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}
+devin_home=${DEVIN_HOME:-"$data_home/devin/cli"}
+devin_credentials=${DEVIN_CREDENTIALS_FILE:-"$data_home/devin/credentials.toml"}
+devin_wanted=false
+if [[ -f $devin_credentials || -f $devin_home/sessions.db ]]; then
+  devin_wanted=true
+fi
 if $devin_excluded; then
   devin_wanted=false
 elif ((${#only[@]} > 0)); then
