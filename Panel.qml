@@ -2353,10 +2353,6 @@ Panel {
 
                 Row {
                   id: costMetrics
-                  // With no priced total, two of the three tiles would only
-                  // show a dash — the disclosure above already says why, so
-                  // skip straight past the empty row instead of showing it.
-                  visible: !!root.cost
                   width: parent.width
                   spacing: Style.space(14)
 
@@ -2381,7 +2377,7 @@ Panel {
                     width: (costMetrics.width - costMetrics.spacing * 2) / 3
                     valueText: root.costSummary && root.costSummary.hasDailyAverage
                       ? root.formatUsd(root.costSummary.averageDailyUsd) : "—"
-                    label: "Avg / recorded day"
+                    label: "Avg / day"
                     hint: root.costSummary && root.costSummary.hasDailyAverage
                       ? root.costSummary.averageDailyDays + " recorded days" : "No day count"
                   }
