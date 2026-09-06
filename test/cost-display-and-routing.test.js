@@ -70,11 +70,11 @@ test("panel displays the collector cost period next to the estimate", () => {
   assert.match(readCostCard(), /"API equivalent"\s*\+\s*\(root\.cost\s*&&\s*root\.cost\.period/)
 })
 
-test("cost details keep the partial disclosure neutral and singular", () => {
+test("cost details keep the partial disclosure neutral, singular, and only shown when actionable", () => {
   const source = readCostCard()
   assert.doesNotMatch(source, /color:\s*root\.warn/)
-  assert.match(source, /Published API-rate equivalent · not subscription billing\./)
   assert.match(source, /Partial estimate/)
+  assert.match(source, /visible:\s*!!root\.provider\s*&&\s*\(!root\.cost\s*\|\|\s*root\.cost\.incomplete\)/)
 })
 
 test("token details do not repeat API prices or partial warnings", () => {

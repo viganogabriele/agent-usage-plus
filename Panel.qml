@@ -1162,7 +1162,10 @@ Panel {
       }
 
       Text {
-        visible: costMetric.hint !== ""
+        // Always present, even when blank, so all three metric tiles in a
+        // row reserve the same height — Column drops invisible items from
+        // the layout, which used to make an empty-hint tile shorter than
+        // its neighbours.
         width: parent.width
         text: costMetric.hint
         textFormat: Text.PlainText
@@ -2330,18 +2333,17 @@ Panel {
                 }
 
                 Text {
-                  // The "not a bill" disclaimer is already implied by the "If
-                  // billed by API" metric label below, so it's only worth a
-                  // full line here when there's something actionable to say:
-                  // a partial estimate, or no priced data at all.
+                  // Only worth a full line here when there's something
+                  // actionable to say: a partial estimate, or no priced data
+                  // at all. The "not a bill" disclaimer for the normal,
+                  // fully-priced case is already implied by the "API
+                  // equivalent" section header, so that case shows nothing.
                   id: costDisclosure
-                  visible: !!root.provider
+                  visible: !!root.provider && (!root.cost || root.cost.incomplete)
                   width: parent.width
                   text: !root.cost
                     ? "No priced token total for this provider yet."
-                    : (root.cost.incomplete
-                      ? "Partial estimate · " + root.unpricedModelText(root.cost)
-                      : "Published API-rate equivalent · not subscription billing.")
+                    : "Partial estimate · " + root.unpricedModelText(root.cost)
                   textFormat: Text.PlainText
                   color: root.dim
                   font.family: root.fontFamily
@@ -2351,6 +2353,10 @@ Panel {
 
                 Row {
                   id: costMetrics
+                  // With no priced total, two of the three tiles would only
+                  // show a dash — the disclosure above already says why, so
+                  // skip straight past the empty row instead of showing it.
+                  visible: !!root.cost
                   width: parent.width
                   spacing: Style.space(14)
 
@@ -2395,11 +2401,13 @@ Panel {
                   }
 
                   Text {
+                    // Day count is dropped here: it's already stated by the
+                    // "Avg / recorded day" metric's hint above, so this line
+                    // only adds what that metric doesn't cover.
                     visible: root.costDailyRows.length > 0
                     width: parent.width
                     text: root.costSummary
-                      ? root.costDailyRows.length + " recorded days · "
-                        + root.formatUsd(root.costSummary.dailyTotalUsd)
+                      ? root.formatUsd(root.costSummary.dailyTotalUsd)
                         + (root.costSummary.dailySource === "reported" ? " reported" : " derived")
                       : ""
                     textFormat: Text.PlainText
