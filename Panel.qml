@@ -623,12 +623,6 @@ Panel {
     return row && row.hasCost ? root.formatUsd(row.estimateUsd) : "—"
   }
 
-  function costApiHint(row) {
-    if (!row || !row.hasCost) return "No pricing data"
-    if (row.incomplete) return "Partial estimate"
-    return "API rate estimate"
-  }
-
   // Combines the two small-print footer lines (price-catalogue coverage and
   // version) into one so the model breakdown doesn't end in a stack of
   // near-identical caption rows.
@@ -1120,20 +1114,28 @@ Panel {
     notifyProcess.running = true
   }
 
-  // A compact metric tile keeps the important cost signals aligned without
-  // turning each one into another warning-looking sentence.
+  // Compact metric tiles give the three key numbers a deliberate visual
+  // hierarchy instead of making them read like a wrapped sentence.
   component CostMetric: Item {
     id: costMetric
     property string label: ""
     property string valueText: ""
     property string hint: ""
 
-    implicitHeight: metricContent.implicitHeight
+    implicitHeight: metricContent.implicitHeight + Style.space(16)
+
+    Rectangle {
+      anchors.fill: parent
+      radius: Style.cornerRadius
+      color: root.alpha(root.foreground, 0.055)
+      border.width: 1
+      border.color: root.alpha(root.foreground, 0.10)
+    }
 
     Column {
       id: metricContent
-      anchors.left: parent.left
-      anchors.right: parent.right
+      anchors.fill: parent
+      anchors.margins: Style.space(8)
       spacing: Style.space(2)
 
       Text {
@@ -1160,7 +1162,10 @@ Panel {
       }
 
       Text {
-        visible: costMetric.hint !== ""
+        // Always present, even when blank, so all three metric tiles in a
+        // row reserve the same height — Column drops invisible items from
+        // the layout, which used to make an empty-hint tile shorter than
+        // its neighbours.
         width: parent.width
         text: costMetric.hint
         textFormat: Text.PlainText
@@ -1530,8 +1535,7 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if (t === "r" || t === "R") root.refreshNow()
-        else if (t === "e" || t === "E") root.toggleExpanded()
+        if (t === "e" || t === "E") root.toggleExpanded()
         else if (t === "s" || t === "S") root.toggleSettings()
       }
 
@@ -1829,7 +1833,7 @@ Panel {
           Text {
             visible: providerSwitch.visible
             width: parent.width
-            text: "Drag to reorder"
+            text: root.providers.length + " providers · drag marks to reorder"
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -2140,14 +2144,14 @@ Panel {
 
                 PanelSectionHeader {
                   width: parent.width
-                  text: "Plan vs API"
+                  text: "All providers"
                   foreground: root.foreground
                   fontFamily: root.fontFamily
                 }
 
                 Text {
                   width: parent.width
-                  text: "On plan/credit versus published API-rate equivalent"
+                  text: "Plan usage next to a published API-rate equivalent"
                   textFormat: Text.PlainText
                   color: root.dim
                   font.family: root.fontFamily
@@ -2304,7 +2308,10 @@ Panel {
               id: costValueCard
               visible: !!root.provider
               width: parent.width
-              implicitHeight: costValueContent.implicitHeight + Style.space(28)
+              // Give this information-dense card the same generous breathing
+              // room as the provider overview above it. The extra vertical
+              // space improves scanability without hiding any analytics.
+              implicitHeight: costValueContent.implicitHeight + Style.space(36)
               color: root.alpha(root.foreground, 0.035)
               borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
               radius: Style.cornerRadius
@@ -2314,28 +2321,29 @@ Panel {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                anchors.leftMargin: Style.space(14)
-                anchors.rightMargin: Style.space(14)
-                spacing: Style.space(10)
+                anchors.leftMargin: Style.space(18)
+                anchors.rightMargin: Style.space(18)
+                spacing: Style.space(14)
 
                 PanelSectionHeader {
                   width: parent.width
-                  text: "Plan vs API" + (root.cost && root.cost.period ? " · " + root.cost.period : "")
+                  text: "API equivalent" + (root.cost && root.cost.period ? " · " + root.cost.period : "")
                   foreground: root.foreground
                   fontFamily: root.fontFamily
                 }
 
                 Text {
-                  // The "not a bill" disclaimer is already implied by the "If
-                  // billed by API" metric label below, so it's only worth a
-                  // full line here when there's something actionable to say:
-                  // a partial estimate, or no priced data at all.
+                  // Only worth a full line here when there's something
+                  // actionable to say: a partial estimate, or no priced data
+                  // at all. The "not a bill" disclaimer for the normal,
+                  // fully-priced case is already implied by the "API
+                  // equivalent" section header, so that case shows nothing.
                   id: costDisclosure
                   visible: !!root.provider && (!root.cost || root.cost.incomplete)
                   width: parent.width
-                  text: root.cost
-                    ? "Partial estimate · " + root.unpricedModelText(root.cost)
-                    : "No priced token total for this provider yet."
+                  text: !root.cost
+                    ? "No priced token total for this provider yet."
+                    : "Partial estimate · " + root.unpricedModelText(root.cost)
                   textFormat: Text.PlainText
                   color: root.dim
                   font.family: root.fontFamily
@@ -2346,7 +2354,7 @@ Panel {
                 Row {
                   id: costMetrics
                   width: parent.width
-                  spacing: Style.space(8)
+                  spacing: Style.space(14)
 
                   CostMetric {
                     width: (costMetrics.width - costMetrics.spacing * 2) / 3
@@ -2358,15 +2366,18 @@ Panel {
                   CostMetric {
                     width: (costMetrics.width - costMetrics.spacing * 2) / 3
                     valueText: root.cost ? root.formatUsd(root.cost.estimateUsd) : "—"
-                    label: "If billed by API"
-                    hint: root.costApiHint(root.costProviderRow(root.provider))
+                    label: "API equivalent"
+                    // The disclosure above already explains the estimate;
+                    // repeating "published-rate" in this small tile adds
+                    // noise without adding information.
+                    hint: ""
                   }
 
                   CostMetric {
                     width: (costMetrics.width - costMetrics.spacing * 2) / 3
                     valueText: root.costSummary && root.costSummary.hasDailyAverage
                       ? root.formatUsd(root.costSummary.averageDailyUsd) : "—"
-                    label: "Avg / recorded day"
+                    label: "Avg / day"
                     hint: root.costSummary && root.costSummary.hasDailyAverage
                       ? root.costSummary.averageDailyDays + " recorded days" : "No day count"
                   }
@@ -2376,21 +2387,23 @@ Panel {
                   id: costDailyBlock
                   visible: !!root.cost && root.costDailyRows.length > 0
                   width: parent.width
-                  spacing: Style.space(6)
+                  spacing: Style.space(10)
 
                   PanelSectionHeader {
                     width: parent.width
-                    text: "API equivalent by day"
+                    text: "Daily API trend"
                     foreground: root.foreground
                     fontFamily: root.fontFamily
                   }
 
                   Text {
+                    // Day count is dropped here: it's already stated by the
+                    // "Avg / recorded day" metric's hint above, so this line
+                    // only adds what that metric doesn't cover.
                     visible: root.costDailyRows.length > 0
                     width: parent.width
                     text: root.costSummary
-                      ? root.costDailyRows.length + " recorded days · "
-                        + root.formatUsd(root.costSummary.dailyTotalUsd)
+                      ? root.formatUsd(root.costSummary.dailyTotalUsd)
                         + (root.costSummary.dailySource === "reported" ? " reported" : " derived")
                       : ""
                     textFormat: Text.PlainText
@@ -2403,7 +2416,7 @@ Panel {
                     id: costDailyChart
                     visible: root.costDailyRows.length > 0
                     width: parent.width
-                    height: Style.space(154)
+                    height: Style.space(166)
 
                     readonly property real axisLeft: Style.space(48)
                     readonly property real axisRight: Style.space(8)
@@ -2522,7 +2535,7 @@ Panel {
                   id: costModelChart
                   visible: root.costModelRows.length > 0
                   width: parent.width
-                  spacing: Style.space(6)
+                  spacing: Style.space(10)
 
                   PanelSectionHeader {
                     width: parent.width
@@ -2538,7 +2551,7 @@ Panel {
                       id: costModelRow
                       required property var modelData
                       width: costModelChart.width
-                      height: Style.space(38)
+                      height: Style.space(44)
 
                       Text {
                         id: costModelName
