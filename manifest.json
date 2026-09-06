@@ -74,6 +74,7 @@
       "syncFileName": "",
       "syncDeviceId": "",
       "notificationsEnabled": false,
+      "openInDetailedView": false,
       "showAvailablePercentage": false,
       "colorfulUsageMeters": false,
       "warnThresholdPct": 75,
@@ -175,6 +176,13 @@
         "step": 1,
         "defaultValue": 90,
         "description": "Usage percentage at which meters switch to the critical (urgent) color."
+      },
+      {
+        "key": "openInDetailedView",
+        "type": "boolean",
+        "label": "Open in detailed view",
+        "defaultValue": false,
+        "description": "Show detailed history and all-provider models whenever the panel opens."
       },
       {
         "key": "notificationsEnabled",

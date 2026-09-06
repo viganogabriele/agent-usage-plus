@@ -401,6 +401,7 @@ Item {
   // one just by installing the widget. See Panel.qml for the actual
   // threshold-crossing watch and Omarchy notification dispatch queue.
   readonly property bool notificationsEnabled: booleanSetting("notificationsEnabled", false)
+  readonly property bool openInDetailedView: booleanSetting("openInDetailedView", false)
   // Presentation only: the UI may show the available complement, while
   // collectors and internal threshold comparisons retain their canonical
   // used fractions so switching modes never changes when a warning fires.
@@ -583,6 +584,10 @@ Item {
 
   function setNotificationsEnabled(value) {
     writeSetting("notificationsEnabled", JSON.stringify(!!value))
+  }
+
+  function setOpenInDetailedView(value) {
+    writeSetting("openInDetailedView", JSON.stringify(!!value))
   }
 
   function setShowAvailablePercentage(value) {

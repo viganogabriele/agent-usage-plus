@@ -65,22 +65,27 @@ Panel {
 
   property bool cursorActive: false
 
-  // Session-only: never written to shell.json, and always false the moment
-  // the panel opens (see onOpenedChanged below) — nobody should be surprised
-  // by a bigger popup than the one they closed last time.
+  // Each opening uses the saved preference; manual toggles are session-only.
   //
   // `expanded` (cross-provider data) and `settingsOpen` (the settings form)
   // are mutually exclusive so the panel never has to grow to fit both at
   // once — toggling one closes the other rather than stacking their content.
   property bool expanded: false
   property bool settingsOpen: false
+  property bool expandedBeforeSettings: false
   function toggleExpanded() {
     root.expanded = !root.expanded
     if (root.expanded) root.settingsOpen = false
   }
   function toggleSettings() {
-    root.settingsOpen = !root.settingsOpen
-    if (root.settingsOpen) root.expanded = false
+    if (root.settingsOpen) {
+      root.settingsOpen = false
+      root.expanded = root.expandedBeforeSettings
+    } else {
+      root.expandedBeforeSettings = root.expanded
+      root.expanded = false
+      root.settingsOpen = true
+    }
   }
 
   // Countdowns and "updated" read this instead of Date.now() so the
@@ -853,7 +858,7 @@ Panel {
   }
   onOpenedChanged: if (opened) {
     cursorActive = false
-    expanded = false
+    expanded = usage.openInDetailedView
     settingsOpen = false
     nowMs = Date.now()
     if (panelFlick) panelFlick.contentY = 0
@@ -1551,8 +1556,8 @@ Panel {
                 spacing: Style.space(6)
 
                 PanelActionButton {
-                  iconText: "󰒓"
-                  tooltipText: root.settingsOpen ? "Close settings (s)" : "Settings (s)"
+                  iconText: root.settingsOpen ? "󰁍" : "󰒓"
+                  tooltipText: root.settingsOpen ? "Back to usage (s)" : "Settings (s)"
                   foreground: root.foreground
                   fontFamily: root.fontFamily
                   size: Style.space(28)
@@ -2681,10 +2686,7 @@ Panel {
           }
 
           // ---------- Expanded: combined view across every enabled
-          // provider, not just the currently selected chip. Purely
-          // additive — session-only `expanded` defaults to false, so a
-          // panel that never toggles it renders identically to before
-          // this section existed.
+          // provider, not just the currently selected chip.
           PanelSeparator {
             visible: false
             foreground: root.foreground
@@ -3377,16 +3379,35 @@ Panel {
                   }
                 }
 
-                // Keep every immediate preference on one visible row. Adding
-                // another toggle must not make Settings taller or introduce
-                // scrolling; each cell stays comfortably within the wide
-                // settings panel.
+                // Preferences wrap within the scrollable settings form.
                 Grid {
                   id: preferenceGrid
                   width: parent.width
                   columns: 3
                   columnSpacing: Style.space(12)
+                  rowSpacing: Style.space(12)
                   readonly property real cellWidth: Math.floor((width - columnSpacing * 2) / 3)
+
+                  Row {
+                    width: preferenceGrid.cellWidth
+                    spacing: Style.space(6)
+
+                    ToggleSwitch {
+                      anchors.verticalCenter: parent.verticalCenter
+                      checked: usage.openInDetailedView
+                      foreground: root.foreground
+                      accent: Color.accent
+                      onToggled: usage.setOpenInDetailedView(!usage.openInDetailedView)
+                    }
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: "Open in detailed view"
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                  }
 
                   Row {
                     width: preferenceGrid.cellWidth
