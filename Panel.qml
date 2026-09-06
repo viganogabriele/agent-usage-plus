@@ -760,6 +760,7 @@ Panel {
     grok: { defaultAsset: "grok.svg", lightAsset: "grok-light.svg" },
     zai: { defaultAsset: "zai.svg", lightAsset: "zai-light.svg" },
     devin: { defaultAsset: "devin.svg", lightAsset: "devin-light.svg" },
+    opencode: { defaultAsset: "opencode-go.svg", lightAsset: "opencode-go-light.svg" },
     "opencode-go": { defaultAsset: "opencode-go.svg", lightAsset: "opencode-go-light.svg" }
   })
 
@@ -837,6 +838,14 @@ Panel {
   // Extra breathing room on both sides so this widget doesn't sit flush
   // against its bar neighbors the way a plain icon slot would.
   readonly property real outerPadding: Style.space(10)
+
+  // How far a bar click target has to bleed above and below its own content
+  // to cover the full height of the slot: caption-sized text leaves a few
+  // pixels of bar on each side that are visibly part of the widget and have
+  // to click like it.
+  function barBleedVertical(itemHeight) {
+    return Math.max(0, (root.height - itemHeight) / 2)
+  }
 
   visible: providers.length > 0 || root.settingsProviders.length > 0
   implicitWidth: Math.max(button.implicitWidth, providersRow.implicitWidth) + outerPadding * 2
@@ -1324,8 +1333,29 @@ Panel {
       Item {
         id: providerGroup
         required property var modelData
+        required property int index
         implicitWidth: groupContent.implicitWidth
         implicitHeight: groupContent.implicitHeight
+
+        // A group is only as wide and as tall as the mark and percentage it
+        // draws, but the strip it sits in is neither: the row's spacing
+        // between groups, the module's outerPadding at either end, and the
+        // bar height above and below caption-sized text all fell through to
+        // the whole-slot button. Its right-click has no provider to name, so
+        // it runs the picker — which, once a default agent is set, silently
+        // starts *that* agent. Right-clicking a few pixels off the Claude
+        // mark therefore opened Codex: exactly the confusion the table in
+        // logic/agents.js exists to remove, reintroduced by the fallback.
+        // Bleeding each target into half the gap (and, at the row's ends,
+        // into the outer padding) makes neighboring targets meet midway with
+        // nothing dead between them. Nothing in the chain clips, so the
+        // out-of-bounds area still takes clicks, and the bleed stays inside
+        // the module, so no neighboring bar module loses one.
+        readonly property real bleedStart: providersRow.spacing / 2
+          + (index === 0 ? root.outerPadding : 0)
+        readonly property real bleedEnd: providersRow.spacing / 2
+          + (index === providersRepeater.count - 1 && root.hiddenBarProviderCount === 0
+            ? root.outerPadding : 0)
 
         Row {
           id: groupContent
@@ -1377,6 +1407,10 @@ Panel {
         WidgetButton {
           id: providerClickTarget
           anchors.fill: parent
+          anchors.leftMargin: -providerGroup.bleedStart
+          anchors.rightMargin: -providerGroup.bleedEnd
+          anchors.topMargin: -root.barBleedVertical(providerGroup.height)
+          anchors.bottomMargin: -root.barBleedVertical(providerGroup.height)
           bar: root.bar
           hasVisualContent: true
           text: ""
@@ -1400,6 +1434,7 @@ Panel {
     }
 
     Item {
+      id: overflowGroup
       visible: root.hiddenBarProviderCount > 0
       implicitWidth: overflowText.implicitWidth
       implicitHeight: overflowText.implicitHeight
@@ -1416,9 +1451,15 @@ Panel {
 
       // This needs its own registered target just like a meter group. The
       // outer WidgetButton is visually behind the row and is not guaranteed
-      // to receive a hit through every bar implementation.
+      // to receive a hit through every bar implementation. It bleeds like a
+      // meter group too, so the row's last gap and the trailing padding do
+      // not become another dead strip.
       WidgetButton {
         anchors.fill: parent
+        anchors.leftMargin: -providersRow.spacing / 2
+        anchors.rightMargin: -root.outerPadding
+        anchors.topMargin: -root.barBleedVertical(overflowGroup.height)
+        anchors.bottomMargin: -root.barBleedVertical(overflowGroup.height)
         bar: root.bar
         hasVisualContent: true
         text: ""
