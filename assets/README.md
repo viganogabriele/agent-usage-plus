@@ -39,7 +39,7 @@ Icons currently shipped:
 | `xai` | `xai.svg`, `xai-light.svg` |
 | `grok` | `grok.svg`, `grok-light.svg` |
 | `zai` | `zai.svg`, `zai-light.svg` |
-| `devin` | `devin.svg` |
+| `devin` | `devin.svg`, `devin-light.svg` |
 | `opencode-go` | `opencode-go.svg`, `opencode-go-light.svg` |
 
 `grok` is a reserved id: xAI's Grok product mark, distinct from the corporate

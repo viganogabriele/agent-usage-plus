@@ -759,7 +759,7 @@ Panel {
     xai: { defaultAsset: "xai.svg", lightAsset: "xai-light.svg" },
     grok: { defaultAsset: "grok.svg", lightAsset: "grok-light.svg" },
     zai: { defaultAsset: "zai.svg", lightAsset: "zai-light.svg" },
-    devin: { defaultAsset: "devin.svg" },
+    devin: { defaultAsset: "devin.svg", lightAsset: "devin-light.svg" },
     "opencode-go": { defaultAsset: "opencode-go.svg", lightAsset: "opencode-go-light.svg" }
   })
 
