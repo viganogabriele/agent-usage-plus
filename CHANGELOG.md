@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- Right-clicking a provider mark in the bar no longer launches the wrong
+  agent. Each mark's click target covered only the pixels it painted, so the
+  gap between two marks, the widget's outer padding, and the bar height above
+  and below the percentage text all fell through to the whole-widget button.
+  That button's right-click names no provider and falls back to
+  `omarchy-agent --pick`, which launches the configured default agent instead
+  of asking — so a right-click a few pixels off the Claude mark opened Codex.
+  Targets now meet midway in the gap and span the full height of the bar.
+
 ## [2.2.0] - 2026-09-05
 
 ### Added
