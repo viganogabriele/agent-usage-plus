@@ -11,6 +11,39 @@ const updater = path.join(__dirname, "..", "collectors", "bin", "omarchy-agent-u
 const pluginUpdater = path.join(__dirname, "..", "collectors", "bin", "agent-usage-plus-update")
 const installer = path.join(__dirname, "..", "collectors", "install.sh")
 
+for (const scenario of [
+  { name: "absent", run: false },
+  { name: "credentials present", file: "data/devin/credentials.toml", run: true },
+  { name: "database present", file: "data/devin/cli/sessions.db", run: true },
+]) {
+  test(`Devin detection: ${scenario.name}`, t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "devin-detection-"))
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+    if (scenario.file) {
+      const file = path.join(root, scenario.file)
+      fs.mkdirSync(path.dirname(file), { recursive: true })
+      fs.writeFileSync(file, "")
+    }
+    const record = path.join(root, "state/omarchy/agents/usage/devin.json")
+    fs.mkdirSync(path.dirname(record), { recursive: true })
+    const base = path.join(root, "base")
+    const runner = path.join(root, "runner")
+    executable(base, `printf refreshed > '${root}/base-called'`)
+    executable(runner, `printf refreshed > '${record}'`)
+    execFileSync("/usr/bin/bash", [pluginUpdater], {
+      env: {
+        HOME: root, PATH: "/usr/bin", XDG_DATA_HOME: path.join(root, "data"),
+        XDG_STATE_HOME: path.join(root, "state"),
+        AGENT_USAGE_PLUS_BASE_UPDATER: base, AGENT_USAGE_PLUS_BUNDLED_RUNNER: runner,
+      },
+      timeout: 5000,
+    })
+    assert.ok(fs.existsSync(path.join(root, "base-called")))
+    assert.equal(fs.existsSync(record) && fs.readFileSync(record, "utf8") === "refreshed", scenario.run)
+    if (scenario.name === "absent") assert.equal(fs.existsSync(record), false)
+  })
+}
+
 function executable(file, body) {
   fs.writeFileSync(file, `#!/usr/bin/env bash\nset -euo pipefail\n${body}\n`, { mode: 0o755 })
 }
