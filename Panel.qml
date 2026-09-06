@@ -760,6 +760,7 @@ Panel {
     grok: { defaultAsset: "grok.svg", lightAsset: "grok-light.svg" },
     zai: { defaultAsset: "zai.svg", lightAsset: "zai-light.svg" },
     devin: { defaultAsset: "devin.svg" },
+    opencode: { defaultAsset: "opencode-go.svg", lightAsset: "opencode-go-light.svg" },
     "opencode-go": { defaultAsset: "opencode-go.svg", lightAsset: "opencode-go-light.svg" }
   })
 
