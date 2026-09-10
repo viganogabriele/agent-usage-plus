@@ -18,6 +18,7 @@ installer or timer described below.
 | Kimi | weekly Coding Plan quota and any 5-hour rolling window from `GET /coding/v1/usages` | `KIMI_API_KEY` or `collectors.json` entry; otherwise **Waiting for API key** gives the exact setup path |
 | OpenCode Go | local session/token stats from opencode's own SQLite store, plus the authoritative rolling/weekly/monthly allowances from Zen's `GET /zen/go/v1/usage` | `opencode auth login` sign-in read from `~/.local/share/opencode/auth.json`; otherwise **Waiting for auth** — local stats still show without it |
 | Devin | local session/token stats from Devin CLI's read-only SQLite store, plus the signed-in account's daily/weekly quota and overage balance from the CLI's `GetUserStatus` request | `devin auth login` sign-in read from `$XDG_DATA_HOME/devin/credentials.toml`; otherwise **Waiting for Devin sign-in** — local stats still show without it |
+| Google Antigravity | local session/token stats from Antigravity SQLite databases (`~/.gemini/antigravity/conversations/*.db`, `~/.gemini/antigravity-cli/conversations/*.db`, and `~/.gemini/antigravity-ide/conversations/*.db`), plus model quota allowances from `agy -p /usage --output-format json` | `agy` CLI availability; otherwise **Waiting for agy** — local conversation stats still show without it |
 | Claude Code | existing local transcript collector, decorated with published API pricing | no new credential; the base Claude collector retains its own sign-in state |
 | Codex | existing local transcript collector, decorated with published API pricing | no new credential; the base Codex collector retains its own sign-in state |
 
@@ -49,8 +50,8 @@ From a clone of this repository:
 ```
 
 The runner atomically writes `openrouter.json`, `deepseek.json`, `xai.json`,
-`zai.json`, `gemini.json`, `cursor.json`, `kimi.json`, `opencode-go.json`, and
-`devin.json` under `$XDG_STATE_HOME/omarchy/agents/usage` (default
+`zai.json`, `gemini.json`, `cursor.json`, `kimi.json`, `opencode-go.json`,
+`devin.json`, and `agy.json` under `$XDG_STATE_HOME/omarchy/agents/usage` (default
 `~/.local/state/omarchy/agents/usage`). Run either collector directly when
 you want to inspect only its JSON output:
 
@@ -213,6 +214,22 @@ authentication guide](https://docs.devin.ai/cli/enterprise/devin-auth). The
 quota RPC is used by the [official Devin CLI](https://github.com/CognitionAI/devin-cli)
 but is not a public API contract, so an unfamiliar response produces a visible
 “usage unavailable” state rather than a fabricated zero.
+
+### Antigravity details
+
+The collector reads local stats from Google Antigravity conversation
+SQLite databases under `~/.gemini/antigravity/conversations/*.db`,
+`~/.gemini/antigravity-cli/conversations/*.db`, and
+`~/.gemini/antigravity-ide/conversations/*.db` in SQLite read-only mode, so
+active WAL-backed conversations remain visible without modifying their files.
+The query extracts token metrics and model names from the protobuf-encoded
+`gen_metadata` table without loading message bodies or transcripts into the
+collector. Override locations with `AGY_CONVERSATIONS_DIR` or `AGY_HOME` if databases
+live in custom paths.
+
+Quota information is retrieved via the official `agy -p /usage --output-format json`
+CLI command, bounded at 1 MiB. If the `agy` binary is not found or fails, local
+conversation stats still display normally while indicating the CLI state.
 
 ## Endpoint stability and provider coverage
 
