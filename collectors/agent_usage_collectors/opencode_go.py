@@ -18,10 +18,13 @@ from urllib.error import HTTPError
 
 from .common import auth_missing, classify_failure, endpoint_problem, now_iso, print_record, request_json
 
-AGENT_ID = "opencode-go"
-AGENT_NAME = "OpenCode Go"
+AGENT_ID = "opencode"
+AGENT_NAME = "OpenCode"
 USAGE_ENDPOINT = "https://opencode.ai/zen/go/v1/usage"
 PROVIDER_ID_IN_DB = "opencode-go"
+# OpenCode has used both ids in the local database; the Go subscription
+# endpoint is still keyed as opencode-go in auth.json.
+PROVIDER_IDS = ("opencode-go", "opencode")
 AUTH_HELP = "Sign in to OpenCode Go (`opencode auth login`) to show usage limits. Local stats are still shown."
 
 _EMPTY_TOKEN_BUCKET = {"inputTokens": 0, "outputTokens": 0, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0}
@@ -77,8 +80,9 @@ def collect_local_stats() -> dict[str, Any]:
     try:
         connection = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0", uri=True, timeout=2)
         try:
+            placeholders = ",".join("?" * len(PROVIDER_IDS))
             rows = connection.execute(
-                """
+                f"""
                 SELECT
                     session_id,
                     time_created,
@@ -88,10 +92,10 @@ def collect_local_stats() -> dict[str, Any]:
                     COALESCE(json_extract(data, '$.tokens.cache.read'), 0) AS cache_read,
                     COALESCE(json_extract(data, '$.tokens.cache.write'), 0) AS cache_write
                 FROM message
-                WHERE json_extract(data, '$.providerID') = ?
+                WHERE json_extract(data, '$.providerID') IN ({placeholders})
                   AND json_extract(data, '$.tokens.total') IS NOT NULL
                 """,
-                (PROVIDER_ID_IN_DB,),
+                PROVIDER_IDS,
             ).fetchall()
         finally:
             connection.close()
@@ -227,6 +231,8 @@ def collect() -> dict[str, Any]:
         )
 
     key = read_key()
+    if key:
+        record["tierLabel"] = "Go"
     if not key:
         return auth_missing(record, AUTH_HELP, status="Waiting for auth")
 

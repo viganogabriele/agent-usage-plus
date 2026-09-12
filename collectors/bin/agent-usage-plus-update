@@ -19,19 +19,30 @@ fi
 flags=()
 only=()
 devin_excluded=false
+opencode_excluded=false
 args=("$@")
 for ((index = 0; index < ${#args[@]}; index++)); do
   case ${args[$index]} in
     --force | --limits-only) flags+=("${args[$index]}") ;;
     --except)
       ((index += 1))
-      [[ ${args[$index]:-} == devin ]] && devin_excluded=true
+      case ${args[$index]:-} in
+        devin) devin_excluded=true ;;
+        opencode | opencode-go) opencode_excluded=true ;;
+      esac
       ;;
     *) only+=("${args[$index]}") ;;
   esac
 done
 
-devin_wanted=true
+# Auto-detect from the same local files the bundled collectors use.
+data_home=${XDG_DATA_HOME:-"$HOME/.local/share"}
+devin_home=${DEVIN_HOME:-"$data_home/devin/cli"}
+devin_credentials=${DEVIN_CREDENTIALS_FILE:-"$data_home/devin/credentials.toml"}
+devin_wanted=false
+if [[ -f $devin_credentials || -f $devin_home/sessions.db ]]; then
+  devin_wanted=true
+fi
 if $devin_excluded; then
   devin_wanted=false
 elif ((${#only[@]} > 0)); then
@@ -41,11 +52,34 @@ elif ((${#only[@]} > 0)); then
   done
 fi
 
-status=0
-"$base_updater" "$@" --except devin &
-base_pid=$!
+opencode_auth=${OPENCODE_AUTH_JSON:-"$data_home/opencode/auth.json"}
+opencode_db=${OPENCODE_DB:-"$data_home/opencode/opencode.db"}
+opencode_wanted=false
+if [[ -f $opencode_auth || -f $opencode_db ]]; then
+  opencode_wanted=true
+fi
+if $opencode_excluded; then
+  opencode_wanted=false
+elif ((${#only[@]} > 0)); then
+  opencode_wanted=false
+  for provider in "${only[@]}"; do
+    [[ $provider == opencode || $provider == opencode-go ]] && opencode_wanted=true
+  done
+fi
+
+bundled=()
 if $devin_wanted; then
-  "$bundled_runner" update "${flags[@]}" devin &
+  bundled+=(devin)
+fi
+if $opencode_wanted; then
+  bundled+=(opencode-go)
+fi
+
+status=0
+"$base_updater" "$@" --except devin --except opencode-go &
+base_pid=$!
+if ((${#bundled[@]} > 0)); then
+  "$bundled_runner" update "${flags[@]}" "${bundled[@]}" &
   bundled_pid=$!
 fi
 

@@ -37,6 +37,11 @@ test("agentCommandFor: starts in the work directory, like omarchy-agent does", (
   assert.match(Agents.WORKDIR_GUARD, /cd "\$HOME\/Work"/)
 })
 
+test("agentCommandFor: OpenCode Go launches the opencode agent", () => {
+  assert.equal(Agents.agentCommandFor("opencode-go"), Agents.agentCommandFor("opencode"))
+  assert.match(Agents.agentCommandFor("opencode-go"), /\bopencode --auto$/)
+})
+
 test("agentCommandFor: a provider that is not an agent has no command", () => {
   for (const id of ["fireworks", "openrouter", "deepseek", "cursor", "kimi", "xai", "zai"])
     assert.equal(Agents.agentCommandFor(id), "")

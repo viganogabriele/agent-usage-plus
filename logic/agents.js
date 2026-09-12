@@ -24,6 +24,7 @@ var AGENT_COMMANDS = {
   crush: ["crush", "--yolo"],
   grok: ["grok", "--permission-mode", "bypassPermissions"],
   opencode: ["opencode", "--auto"],
+  "opencode-go": ["opencode", "--auto"],
   omp: ["omp", "--auto-approve"],
   pi: ["pi"]
 }

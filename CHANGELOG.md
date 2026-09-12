@@ -14,6 +14,12 @@ All notable changes to this project are documented in this file. The format is b
   `omarchy-agent --pick`, which launches the configured default agent instead
   of asking — so a right-click a few pixels off the Claude mark opened Codex.
   Targets now meet midway in the gap and span the full height of the bar.
+- OpenCode Go now refreshes through the widget dispatcher, the same way Devin
+  does, and publishes as `opencode.json` so the existing OpenCode mark
+  updates. The previous change only mapped that mark to the Go icons, so the
+  bar kept a stale local-stats record while the Go collector never ran.
+  Local stats include both the `opencode` and `opencode-go` provider ids in
+  opencode's SQLite store, and right-clicking the mark launches `opencode`.
 
 ## [2.2.0] - 2026-09-05
 

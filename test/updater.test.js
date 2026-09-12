@@ -11,6 +11,152 @@ const updater = path.join(__dirname, "..", "collectors", "bin", "omarchy-agent-u
 const pluginUpdater = path.join(__dirname, "..", "collectors", "bin", "agent-usage-plus-update")
 const installer = path.join(__dirname, "..", "collectors", "install.sh")
 
+for (const scenario of [
+  { name: "absent", run: false },
+  { name: "credentials present", file: "data/devin/credentials.toml", run: true },
+  { name: "database present", file: "data/devin/cli/sessions.db", run: true },
+]) {
+  test(`Devin detection: ${scenario.name}`, t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "devin-detection-"))
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+    if (scenario.file) {
+      const file = path.join(root, scenario.file)
+      fs.mkdirSync(path.dirname(file), { recursive: true })
+      fs.writeFileSync(file, "")
+    }
+    const record = path.join(root, "state/omarchy/agents/usage/devin.json")
+    fs.mkdirSync(path.dirname(record), { recursive: true })
+    const base = path.join(root, "base")
+    const runner = path.join(root, "runner")
+    executable(base, `printf refreshed > '${root}/base-called'`)
+    executable(runner, `printf refreshed > '${record}'`)
+    execFileSync("/usr/bin/bash", [pluginUpdater], {
+      env: {
+        HOME: root, PATH: "/usr/bin", XDG_DATA_HOME: path.join(root, "data"),
+        XDG_STATE_HOME: path.join(root, "state"),
+        AGENT_USAGE_PLUS_BASE_UPDATER: base, AGENT_USAGE_PLUS_BUNDLED_RUNNER: runner,
+      },
+      timeout: 5000,
+    })
+    assert.ok(fs.existsSync(path.join(root, "base-called")))
+    assert.equal(fs.existsSync(record) && fs.readFileSync(record, "utf8") === "refreshed", scenario.run)
+    if (scenario.name === "absent") assert.equal(fs.existsSync(record), false)
+  })
+}
+
+for (const scenario of [
+  { name: "absent", run: false },
+  { name: "auth present", file: "data/opencode/auth.json", run: true },
+  { name: "database present", file: "data/opencode/opencode.db", run: true },
+]) {
+  test(`OpenCode detection: ${scenario.name}`, t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "opencode-detection-"))
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+    if (scenario.file) {
+      const file = path.join(root, scenario.file)
+      fs.mkdirSync(path.dirname(file), { recursive: true })
+      fs.writeFileSync(file, "")
+    }
+    const record = path.join(root, "state/omarchy/agents/usage/opencode-go.json")
+    fs.mkdirSync(path.dirname(record), { recursive: true })
+    const base = path.join(root, "base")
+    const runner = path.join(root, "runner")
+    executable(base, `printf refreshed > '${root}/base-called'`)
+    executable(runner, `printf refreshed > '${record}'`)
+    execFileSync("/usr/bin/bash", [pluginUpdater], {
+      env: {
+        HOME: root, PATH: "/usr/bin", XDG_DATA_HOME: path.join(root, "data"),
+        XDG_STATE_HOME: path.join(root, "state"),
+        AGENT_USAGE_PLUS_BASE_UPDATER: base, AGENT_USAGE_PLUS_BUNDLED_RUNNER: runner,
+      },
+      timeout: 5000,
+    })
+    assert.ok(fs.existsSync(path.join(root, "base-called")))
+    assert.equal(fs.existsSync(record) && fs.readFileSync(record, "utf8") === "refreshed", scenario.run)
+    if (scenario.name === "absent") assert.equal(fs.existsSync(record), false)
+  })
+}
+
+test("plugin updater treats opencode as an alias for the OpenCode Go collector", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-usage-opencode-alias-"))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const base = path.join(root, "base-updater")
+  const bundled = path.join(root, "bundled-runner")
+  const calls = path.join(root, "calls")
+  executable(base, `printf 'base:%s\n' "$*" >>"${calls}"`)
+  executable(bundled, `printf 'bundled:%s\n' "$*" >>"${calls}"`)
+
+  execFileSync("bash", [pluginUpdater, "--force", "opencode"], {
+    env: {
+      ...process.env,
+      HOME: root,
+      XDG_DATA_HOME: path.join(root, "data"),
+      AGENT_USAGE_PLUS_BASE_UPDATER: base,
+      AGENT_USAGE_PLUS_BUNDLED_RUNNER: bundled,
+    },
+  })
+
+  const lines = fs.readFileSync(calls, "utf8").trim().split("\n")
+  assert.ok(lines.includes("bundled:update --force opencode-go"))
+  assert.equal(lines.find(line => line.startsWith("base:")), "base:--force opencode --except devin --except opencode-go")
+})
+
+test("plugin updater --except opencode skips OpenCode Go even when files exist", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-usage-opencode-except-"))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const auth = path.join(root, "data/opencode/auth.json")
+  fs.mkdirSync(path.dirname(auth), { recursive: true })
+  fs.writeFileSync(auth, "")
+  const base = path.join(root, "base-updater")
+  const bundled = path.join(root, "bundled-runner")
+  const calls = path.join(root, "calls")
+  executable(base, `printf 'base:%s\n' "$*" >>"${calls}"`)
+  executable(bundled, `printf 'bundled:%s\n' "$*" >>"${calls}"`)
+
+  execFileSync("bash", [pluginUpdater, "--except", "opencode"], {
+    env: {
+      ...process.env,
+      HOME: root,
+      XDG_DATA_HOME: path.join(root, "data"),
+      AGENT_USAGE_PLUS_BASE_UPDATER: base,
+      AGENT_USAGE_PLUS_BUNDLED_RUNNER: bundled,
+    },
+  })
+
+  const lines = fs.readFileSync(calls, "utf8").trim().split("\n")
+  assert.equal(lines.some(line => line.startsWith("bundled:")), false)
+  assert.equal(lines.find(line => line.startsWith("base:")), "base:--except opencode --except devin --except opencode-go")
+})
+
+test("plugin updater runs Devin and OpenCode Go in one bundled call", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-usage-bundled-both-"))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const credentials = path.join(root, "data/devin/credentials.toml")
+  const auth = path.join(root, "data/opencode/auth.json")
+  fs.mkdirSync(path.dirname(credentials), { recursive: true })
+  fs.mkdirSync(path.dirname(auth), { recursive: true })
+  fs.writeFileSync(credentials, "")
+  fs.writeFileSync(auth, "")
+  const base = path.join(root, "base-updater")
+  const bundled = path.join(root, "bundled-runner")
+  const calls = path.join(root, "calls")
+  executable(base, `printf 'base:%s\n' "$*" >>"${calls}"`)
+  executable(bundled, `printf 'bundled:%s\n' "$*" >>"${calls}"`)
+
+  execFileSync("bash", [pluginUpdater, "--force"], {
+    env: {
+      ...process.env,
+      HOME: root,
+      XDG_DATA_HOME: path.join(root, "data"),
+      AGENT_USAGE_PLUS_BASE_UPDATER: base,
+      AGENT_USAGE_PLUS_BUNDLED_RUNNER: bundled,
+    },
+  })
+
+  const lines = fs.readFileSync(calls, "utf8").trim().split("\n")
+  assert.ok(lines.includes("bundled:update --force devin opencode-go"))
+})
+
 function executable(file, body) {
   fs.writeFileSync(file, `#!/usr/bin/env bash\nset -euo pipefail\n${body}\n`, { mode: 0o755 })
 }
@@ -109,7 +255,7 @@ test("plugin updater adds Devin without running every bundled collector", t => {
   const lines = fs.readFileSync(calls, "utf8").trim().split("\n")
   assert.ok(lines.includes("bundled:update --force devin"))
   const baseCall = lines.find(line => line.startsWith("base:"))
-  assert.equal(baseCall, "base:--force devin --except kimi --except devin")
+  assert.equal(baseCall, "base:--force devin --except kimi --except devin --except opencode-go")
 })
 
 test("plugin updater reaches the real packaged updater through an installed --codex-cli-compat override, not itself", t => {
@@ -141,7 +287,9 @@ test("plugin updater reaches the real packaged updater through an installed --co
   execFileSync("bash", [pluginUpdater, "--force"], {
     env: {
       ...process.env,
+      HOME: root,
       XDG_BIN_HOME: bin,
+      XDG_DATA_HOME: path.join(root, "data"),
       XDG_STATE_HOME: path.join(root, "state"),
       AGENT_USAGE_PLUS_PACKAGED_UPDATER: packaged,
       AGENT_USAGE_PLUS_CODEX_COLLECTOR: codex,
@@ -150,6 +298,7 @@ test("plugin updater reaches the real packaged updater through an installed --co
   })
 
   const lines = fs.readFileSync(calls, "utf8").trim().split("\n")
-  assert.ok(lines.includes("packaged:--except codex --force --except devin"))
+  assert.ok(lines.includes("packaged:--except codex --force --except devin --except opencode-go"))
   assert.ok(lines.includes("codex:--force"))
+  assert.equal(lines.some(line => line.startsWith("bundled:")), false)
 })

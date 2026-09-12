@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from importlib.machinery import SourceFileLoader
+import sqlite3
 import tempfile
 import types
 import unittest
@@ -362,6 +363,11 @@ class DevinCollectorTests(unittest.TestCase):
             "devin",
             runner.selected_providers(["update", "--except", "devin"]),
         )
+        self.assertEqual(runner.selected_providers(["update", "opencode"]), ["opencode-go"])
+        self.assertNotIn(
+            "opencode-go",
+            runner.selected_providers(["update", "--except", "opencode"]),
+        )
 
     def test_stats_from_rows_uses_canonical_token_buckets(self) -> None:
         today_ms = int(_local_midday_ms(days_ago=0))
@@ -584,6 +590,39 @@ class OpenCodeGoCollectorTests(unittest.TestCase):
         self.assertEqual(len(stats["recentDays"]), 7)
         self.assertEqual(stats["recentDays"][-1]["messageCount"], 185)
 
+    def test_collect_local_stats_counts_opencode_and_opencode_go_rows(self) -> None:
+        today_ms = int(_utc_midnight_ms(days_ago=0))
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "opencode.db"
+            auth_path = Path(tmp) / "auth.json"
+            connection = sqlite3.connect(db_path)
+            connection.execute("CREATE TABLE message (session_id TEXT, time_created INTEGER, data TEXT)")
+            connection.executemany(
+                "INSERT INTO message VALUES (?, ?, ?)",
+                [
+                    ("go-session", today_ms, json.dumps({
+                        "providerID": "opencode-go", "modelID": "glm-5.3",
+                        "tokens": {"total": 10, "input": 6, "output": 4, "cache": {"read": 0, "write": 0}},
+                    })),
+                    ("zen-session", today_ms, json.dumps({
+                        "providerID": "opencode", "modelID": "kimi-k3",
+                        "tokens": {"total": 5, "input": 3, "output": 2, "cache": {"read": 0, "write": 0}},
+                    })),
+                    ("other-session", today_ms, json.dumps({
+                        "providerID": "anthropic", "modelID": "claude",
+                        "tokens": {"total": 99, "input": 90, "output": 9, "cache": {"read": 0, "write": 0}},
+                    })),
+                ],
+            )
+            connection.commit()
+            connection.close()
+            with patch.object(opencode_go, "opencode_paths", return_value=(auth_path, db_path)):
+                stats = opencode_go.collect_local_stats()
+        self.assertEqual(stats["todayPrompts"], 2)
+        self.assertEqual(stats["todayTotalTokens"], 15)
+        self.assertEqual(stats["totalSessions"], 2)
+        self.assertNotIn("claude", stats["modelUsage"])
+
     def test_stats_from_rows_empty_is_a_valid_zero_state(self) -> None:
         stats = opencode_go_stats_from_rows([])
         self.assertEqual(stats["totalPrompts"], 0)
@@ -607,10 +646,12 @@ class OpenCodeGoCollectorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as empty_state_dir:
             with patch.object(opencode_go, "read_key", return_value=None), patch.object(opencode_go, "collect_local_stats", return_value=stats), patch("agent_usage_collectors.common.usage_dir", return_value=Path(empty_state_dir)):
                 record = collect_opencode_go()
+        self.assertEqual(record["id"], "opencode")
         self.assertFalse(record["ready"])
         self.assertEqual(record["usageStatusText"], "Waiting for auth")
         self.assertEqual(record["todayTotalTokens"], 900)
         self.assertEqual(record["limits"], [])
+        self.assertNotIn("tierLabel", record)
 
     def test_collect_reports_sign_in_expired_without_dropping_local_stats(self) -> None:
         stats = {
@@ -636,6 +677,9 @@ class OpenCodeGoCollectorTests(unittest.TestCase):
         }
         with patch.object(opencode_go, "read_key", return_value="live-key"), patch.object(opencode_go, "collect_local_stats", return_value=stats), patch.object(opencode_go, "request_json", return_value=payload):
             record = collect_opencode_go()
+        self.assertEqual(record["id"], "opencode")
+        self.assertEqual(record["name"], "OpenCode")
+        self.assertEqual(record["tierLabel"], "Go")
         self.assertTrue(record["ready"])
         self.assertEqual([limit["title"] for limit in record["limits"]], ["Session", "Weekly", "Monthly"])
         self.assertEqual(record["limits"][1]["percent"], 0.2)

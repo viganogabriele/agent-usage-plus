@@ -34,15 +34,22 @@ COLLECTORS = {
     "opencode-go": collect_opencode_go,
 }
 
+PROVIDER_ALIASES = {
+    "opencode": "opencode-go",
+}
+
 
 def usage_dir() -> Path:
     return Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state")) / "omarchy" / "agents" / "usage"
 
 
-def publish(agent_id: str, record: dict) -> None:
+def publish(record: dict) -> None:
     # Collectors already carry forward the last known-good numeric fields
     # into a problem record themselves (agent_usage_collectors.common), so
-    # this only needs to write whatever collect() returned.
+    # this only needs to write whatever collect() returned. The filename
+    # follows the record id so an OpenCode Go refresh updates the existing
+    # OpenCode mark rather than sitting next to a stale opencode.json.
+    agent_id = record["id"]
     destination = usage_dir()
     destination.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=destination, prefix=f".{agent_id}.", delete=False) as handle:
@@ -65,13 +72,20 @@ def selected_providers(argv: list[str] | None = None) -> list[str]:
     # after --except, whereas parse_intermixed_args supports either order.
     args = parser.parse_intermixed_args(argv)
     requested = args.providers if args.providers else sorted(COLLECTORS)
-    excluded = set(args.excluded)
-    return [provider for provider in requested if provider in COLLECTORS and provider not in excluded]
+    excluded = {PROVIDER_ALIASES.get(name, name) for name in args.excluded}
+    resolved = []
+    seen = set()
+    for name in requested:
+        provider = PROVIDER_ALIASES.get(name, name)
+        if provider in COLLECTORS and provider not in excluded and provider not in seen:
+            seen.add(provider)
+            resolved.append(provider)
+    return resolved
 
 
 def main() -> int:
     for agent_id in selected_providers():
-        publish(agent_id, COLLECTORS[agent_id]())
+        publish(COLLECTORS[agent_id]())
     return 0
 
 

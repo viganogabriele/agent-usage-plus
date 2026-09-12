@@ -3,9 +3,9 @@
 This is the plugin's **supported companion package** for providers with a
 useful account budget or subscription-usage source. It is dependency-free
 Python (3.10+) and does not send a credential anywhere other than the
-corresponding provider endpoint. Devin runs through the widget's local
-dispatcher; the remaining companion collectors stay opt-in through the
-installer or timer described below.
+corresponding provider endpoint. Devin and OpenCode Go run through the
+widget's local dispatcher; the remaining companion collectors stay opt-in
+through the installer or timer described below.
 
 | Provider | What the collector reads | First-class credential state |
 |---|---|---|
@@ -49,9 +49,10 @@ From a clone of this repository:
 ```
 
 The runner atomically writes `openrouter.json`, `deepseek.json`, `xai.json`,
-`zai.json`, `gemini.json`, `cursor.json`, `kimi.json`, `opencode-go.json`, and
+`zai.json`, `gemini.json`, `cursor.json`, `kimi.json`, `opencode.json`, and
 `devin.json` under `$XDG_STATE_HOME/omarchy/agents/usage` (default
-`~/.local/state/omarchy/agents/usage`). Run either collector directly when
+`~/.local/state/omarchy/agents/usage`). OpenCode Go publishes as `opencode`
+so it refreshes the existing OpenCode mark. Run either collector directly when
 you want to inspect only its JSON output:
 
 ```bash
