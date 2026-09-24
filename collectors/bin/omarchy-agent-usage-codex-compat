@@ -56,6 +56,40 @@ PATCHES = [
         '    account = (account_msg.get("result") or {}).get("account") or {}\n'
         '    limits = (limits_msg.get("result") or {}).get("rateLimits") or {}',
     ),
+    (
+        # Codex 0.156 writes notifications (remoteControl/status/changed,
+        # account/updated) and the RPC reply in one stdout chunk. readline()
+        # pulls the whole chunk into Python's buffer and returns only the
+        # first line; the next select() then waits on an empty pipe while the
+        # reply sits in that buffer, so account/read "times out" and the
+        # panel shows "Codex limits unavailable / account/read". Read raw
+        # bytes into a buffer kept on proc and drain complete lines before
+        # waiting on the pipe (omacom/omarchy#10143, #12979).
+        '  deadline = time.time() + timeout\n'
+        '  while time.time() < deadline:\n'
+        '    ready, _, _ = select.select([proc.stdout], [], [], 0.25)\n'
+        '    if not ready:\n'
+        '      continue\n'
+        '    line = proc.stdout.readline()\n'
+        '    if not line:\n'
+        '      break\n',
+        '  pending = getattr(proc, "_rpc_pending", None)\n'
+        '  if pending is None:\n'
+        '    pending = proc._rpc_pending = bytearray()\n'
+        '  deadline = time.monotonic() + timeout\n'
+        '  while time.monotonic() < deadline:\n'
+        '    if b"\\n" not in pending:\n'
+        '      ready, _, _ = select.select([proc.stdout], [], [], 0.25)\n'
+        '      if not ready:\n'
+        '        continue\n'
+        '      chunk = os.read(proc.stdout.fileno(), 65536)\n'
+        '      if not chunk:\n'
+        '        break\n'
+        '      pending.extend(chunk)\n'
+        '      continue\n'
+        '    line, _, rest = pending.partition(b"\\n")\n'
+        '    pending[:] = rest\n',
+    ),
 ]
 
 

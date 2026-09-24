@@ -14,6 +14,13 @@ All notable changes to this project are documented in this file. The format is b
   `omarchy-agent --pick`, which launches the configured default agent instead
   of asking — so a right-click a few pixels off the Claude mark opened Codex.
   Targets now meet midway in the gap and span the full height of the bar.
+- Codex limits no longer show "Codex limits unavailable / account/read" with
+  Codex CLI 0.156. The CLI now writes notifications and the RPC reply in one
+  stdout chunk; Omarchy's collector reads the chunk with `readline()`, keeps
+  only the first line, and then waits on an empty pipe until `account/read`
+  times out. The `--codex-cli-compat` wrapper now patches that reader to drain
+  buffered lines before waiting (omacom/omarchy#10143, #12979), and skips the
+  patch once Omarchy ships the fix.
 
 ## [2.2.0] - 2026-09-05
 
