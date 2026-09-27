@@ -4,8 +4,32 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- Google Antigravity (`agy`) collector and provider mark: reads local CLI and IDE
+  SQLite databases for token and session history, plus quota allowances from
+  `agy -p /usage --output-format json`.
+
 ### Fixed
 
+- The Antigravity collector no longer opens a browser tab and steals focus on
+  every refresh while signed out. `agy -p /usage` runs a real agent turn: when
+  signed out it prints an OAuth URL, opens it in the browser, and blocks for
+  up to a minute waiting for the callback — repeated on every unattended
+  refresh cycle, this meant a new tab grabbing focus every cycle. The
+  collector now probes sign-in state first with the cheap, non-interactive
+  `agy models` (fails fast, no browser, no prompt) and only ever runs
+  `-p /usage` once that probe confirms a signed-in session. A probe failure
+  unrelated to auth (timeout, launch failure, an unrecognized exit) is
+  reported as a transport problem, not misread as "please sign in".
+- The Antigravity collector no longer drops a whole `gen_metadata`/`steps` row
+  (token counts included) just because that row also embeds a large, unrelated
+  blob — the full chat context on a session's final generation, or a tool
+  invocation payload — which some rows carry alongside their small usage
+  fields. The row-size cap is now generous enough to admit real-world rows,
+  and the protobuf parser skips past an oversized embedded field instead of
+  aborting the rest of the message, so the small fields that matter are found
+  regardless of size or ordering of the fields around them.
 - Right-clicking a provider mark in the bar no longer launches the wrong
   agent. Each mark's click target covered only the pixels it painted, so the
   gap between two marks, the widget's outer padding, and the bar height above

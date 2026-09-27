@@ -35,7 +35,7 @@ omarchy plugin remove io.github.viganogabriele.agent-usage-plus
 ## Providers
 
 Claude Code, Codex, Fireworks, OpenRouter, DeepSeek, Gemini, Cursor, Kimi,
-OpenCode Go, Devin, xAI/Grok and Z.AI/GLM.
+OpenCode Go, Devin, Google Antigravity, xAI/Grok and Z.AI/GLM.
 
 Claude Code and Codex use Omarchy's built-in records. Other providers use the
 optional collectors:

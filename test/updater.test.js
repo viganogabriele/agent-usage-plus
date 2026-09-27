@@ -109,7 +109,51 @@ test("plugin updater adds Devin without running every bundled collector", t => {
   const lines = fs.readFileSync(calls, "utf8").trim().split("\n")
   assert.ok(lines.includes("bundled:update --force devin"))
   const baseCall = lines.find(line => line.startsWith("base:"))
-  assert.equal(baseCall, "base:--force devin --except kimi --except devin")
+  assert.equal(baseCall, "base:--force devin --except kimi --except devin --except agy")
+})
+
+test("plugin updater adds agy without running every bundled collector", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-usage-plugin-updater-"))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const base = path.join(root, "base-updater")
+  const bundled = path.join(root, "bundled-runner")
+  const calls = path.join(root, "calls")
+  executable(base, `printf 'base:%s\n' "$*" >>"${calls}"`)
+  executable(bundled, `printf 'bundled:%s\n' "$*" >>"${calls}"`)
+
+  execFileSync("bash", [pluginUpdater, "--force", "agy", "--except", "kimi"], {
+    env: {
+      ...process.env,
+      AGENT_USAGE_PLUS_BASE_UPDATER: base,
+      AGENT_USAGE_PLUS_BUNDLED_RUNNER: bundled,
+    },
+  })
+
+  const lines = fs.readFileSync(calls, "utf8").trim().split("\n")
+  assert.ok(lines.includes("bundled:update --force agy"))
+  const baseCall = lines.find(line => line.startsWith("base:"))
+  assert.equal(baseCall, "base:--force agy --except kimi --except devin --except agy")
+})
+
+test("plugin updater deduplicates repeated provider arguments", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-usage-plugin-updater-"))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const base = path.join(root, "base-updater")
+  const bundled = path.join(root, "bundled-runner")
+  const calls = path.join(root, "calls")
+  executable(base, `printf 'base:%s\n' "$*" >>"${calls}"`)
+  executable(bundled, `printf 'bundled:%s\n' "$*" >>"${calls}"`)
+
+  execFileSync("bash", [pluginUpdater, "devin", "devin", "agy", "agy"], {
+    env: {
+      ...process.env,
+      AGENT_USAGE_PLUS_BASE_UPDATER: base,
+      AGENT_USAGE_PLUS_BUNDLED_RUNNER: bundled,
+    },
+  })
+
+  const lines = fs.readFileSync(calls, "utf8").trim().split("\n")
+  assert.ok(lines.includes("bundled:update devin agy"))
 })
 
 test("plugin updater reaches the real packaged updater through an installed --codex-cli-compat override, not itself", t => {
@@ -150,6 +194,6 @@ test("plugin updater reaches the real packaged updater through an installed --co
   })
 
   const lines = fs.readFileSync(calls, "utf8").trim().split("\n")
-  assert.ok(lines.includes("packaged:--except codex --force --except devin"))
+  assert.ok(lines.includes("packaged:--except codex --force --except devin --except agy"))
   assert.ok(lines.includes("codex:--force"))
 })

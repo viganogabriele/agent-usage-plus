@@ -56,7 +56,7 @@ cp -a "$source_root/bin/." "$data_root/bin/"
 mkdir -p "$data_root/scripts" "$data_root/logic"
 cp -a "$(dirname "$source_root")/scripts/calculate-api-cost" "$data_root/scripts/"
 cp -a "$(dirname "$source_root")/logic/cost.js" "$(dirname "$source_root")/logic/api-price-catalogue.js" "$data_root/logic/"
-chmod 0755 "$data_root/bin/agent-usage-plus-collectors" "$data_root/bin/omarchy-agent-usage-openrouter" "$data_root/bin/omarchy-agent-usage-deepseek" "$data_root/bin/omarchy-agent-usage-xai" "$data_root/bin/omarchy-agent-usage-zai" "$data_root/bin/omarchy-agent-usage-gemini" "$data_root/bin/omarchy-agent-usage-cursor" "$data_root/bin/omarchy-agent-usage-devin" "$data_root/bin/omarchy-agent-usage-kimi" "$data_root/bin/omarchy-agent-usage-opencode-go" "$data_root/bin/omarchy-agent-usage-claude-cost" "$data_root/bin/omarchy-agent-usage-codex-cost" "$data_root/scripts/calculate-api-cost"
+chmod 0755 "$data_root/bin/agent-usage-plus-collectors" "$data_root/bin/omarchy-agent-usage-openrouter" "$data_root/bin/omarchy-agent-usage-deepseek" "$data_root/bin/omarchy-agent-usage-xai" "$data_root/bin/omarchy-agent-usage-zai" "$data_root/bin/omarchy-agent-usage-gemini" "$data_root/bin/omarchy-agent-usage-cursor" "$data_root/bin/omarchy-agent-usage-devin" "$data_root/bin/omarchy-agent-usage-kimi" "$data_root/bin/omarchy-agent-usage-opencode-go" "$data_root/bin/omarchy-agent-usage-agy" "$data_root/bin/omarchy-agent-usage-claude-cost" "$data_root/bin/omarchy-agent-usage-codex-cost" "$data_root/scripts/calculate-api-cost"
 chmod 0755 "$data_root/bin/agent-usage-plus-update"
 chmod 0755 "$data_root/bin/omarchy-agent-usage-codex-compat" "$data_root/bin/omarchy-agent-usage-update"
 
@@ -90,6 +90,7 @@ if [[ -n $omarchy_bin ]]; then
   ln -sfn "$data_root/bin/omarchy-agent-usage-devin" "$omarchy_bin/omarchy-agent-usage-devin"
   ln -sfn "$data_root/bin/omarchy-agent-usage-kimi" "$omarchy_bin/omarchy-agent-usage-kimi"
   ln -sfn "$data_root/bin/omarchy-agent-usage-opencode-go" "$omarchy_bin/omarchy-agent-usage-opencode-go"
+  ln -sfn "$data_root/bin/omarchy-agent-usage-agy" "$omarchy_bin/omarchy-agent-usage-agy"
   if $with_transcript_cost; then
     for provider in claude codex; do
       target="$omarchy_bin/omarchy-agent-usage-$provider"
