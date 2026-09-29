@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import "logic/aggregate.js" as Aggregate
 import "logic/format.js" as Format
+import "logic/accounts.js" as Accounts
 
 // The display side of agent usage. All extraction lives behind
 // omarchy-agent-usage-update, which writes one JSON record per agent into
@@ -22,6 +23,42 @@ Item {
 
   readonly property string home: Quickshell.env("HOME") || ""
   readonly property string usageDir: (Quickshell.env("XDG_STATE_HOME") || home + "/.local/state") + "/omarchy/agents/usage"
+  readonly property string accountDataRoot: Quickshell.env("XDG_DATA_HOME") || home + "/.local/share"
+  readonly property var accountProfiles: Accounts.normalizeProfiles(setting("accountProfiles", {}))
+  readonly property var selectedAccounts: setting("selectedAccounts", {})
+  onAccountProfilesChanged: if (refreshStarted) runUpdate("normal")
+
+  function activeAccountId(provider) {
+    var selected = selectedAccounts && selectedAccounts[provider]
+    return selected && accountProfiles[selected] && accountProfiles[selected].provider === provider
+      ? selected : provider
+  }
+
+  function addAccount(provider, name) {
+    var id = Accounts.nextProfileId(provider, name, accountProfiles)
+    if (!id) return ""
+    var profiles = Object.assign({}, accountProfiles)
+    profiles[id] = { provider: provider, name: String(name).trim().slice(0, 80) }
+    writeSetting("accountProfiles", JSON.stringify(profiles))
+    return id
+  }
+
+  function selectAccount(provider, id) {
+    if (id !== provider && (!accountProfiles[id] || accountProfiles[id].provider !== provider)) return
+    var selected = Object.assign({}, selectedAccounts || {})
+    selected[provider] = id
+    writeSetting("selectedAccounts", JSON.stringify(selected))
+  }
+
+  function removeAccount(id) {
+    if (!accountProfiles[id]) return
+    var profiles = Object.assign({}, accountProfiles)
+    var provider = profiles[id].provider
+    var wasSelected = activeAccountId(provider) === id
+    delete profiles[id]
+    writeSetting("accountProfiles", JSON.stringify(profiles))
+    if (wasSelected) selectAccount(provider, provider)
+  }
 
   // ------------------------------------------------------------- discovery
 
@@ -250,6 +287,7 @@ Item {
     var scriptPath = decodeURIComponent(scriptUrl.replace(/^file:\/\//, ""))
     if (kind === "force") updateArgs.unshift("--force")
     if (kind === "limits") updateArgs.unshift("--limits-only")
+    updateArgs.push("--profiles-json", JSON.stringify(root.accountProfiles))
     return ["/bin/bash", scriptPath].concat(updateArgs)
   }
 
@@ -408,11 +446,8 @@ Item {
   // No cap of our own: Fixed providers fill this budget first, and only
   // what's left goes to rotating slots (see selectBarLayout), so an
   // arbitrary number here silently shrinks Cycle slots the person actually
-  // asked for the moment enough providers are marked Fixed. The real, non-
-  // arbitrary ceiling is however many providers exist to mark in the first
-  // place — selectBarLayout's own internal clamp already stops at 10, the
-  // total the bundled collectors ship — so this is left high enough to
-  // never be the thing doing the trimming.
+  // asked for the moment enough providers are marked Fixed. The real ceiling
+  // is the configured list, including additional accounts.
   readonly property int barSlotLimit: 999
 
   function booleanSetting(name, fallback) {
@@ -439,9 +474,13 @@ Item {
   // not depend on this setting.
   readonly property bool colorfulUsageMeters: booleanSetting("colorfulUsageMeters", false)
 
-  readonly property var showInBarList: Aggregate.selectBarProviders(enabledProviders, settings)
+  readonly property var activeBarCandidates: enabledProviders.filter(function(p) {
+    var brand = p.brand || p.providerId
+    return (brand !== "claude" && brand !== "codex") || p.providerId === root.activeAccountId(brand)
+  })
+  readonly property var showInBarList: Aggregate.selectBarProviders(activeBarCandidates, settings)
   readonly property var barLayout: Aggregate.selectBarLayout(
-    enabledProviders, settings, legacyCycleMode ? "legacy-cycle" : "roles",
+    activeBarCandidates, settings, legacyCycleMode ? "legacy-cycle" : "roles",
     barCycleIndex, barCycleSlots, barSlotLimit)
   readonly property var cycleBarProviders: barLayout.cycling || []
 

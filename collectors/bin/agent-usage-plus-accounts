@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Collect isolated Claude/Codex profiles into ordinary usage records."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+PROFILE_ID = re.compile(r"^(claude|codex)-[a-z0-9][a-z0-9_-]{0,55}$")
+MAX_CONFIG_BYTES = 65536
+MAX_RECORD_BYTES = 1048576
+AUTH_ENV = {
+    "claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+               "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CODE_OAUTH_SCOPES",
+               "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+               "CLAUDE_CODE_USE_ANTHROPIC_AWS"),
+    "codex": ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN",
+              "OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE"),
+}
+
+
+def profiles_from_json(raw: str) -> dict[str, dict[str, str]]:
+    if len(raw.encode("utf-8")) > MAX_CONFIG_BYTES:
+        raise ValueError("Account settings are too large")
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("Account settings must be an object")
+    profiles = {}
+    for account_id, value in parsed.items():
+        if not isinstance(account_id, str) or not PROFILE_ID.fullmatch(account_id):
+            continue
+        provider = account_id.split("-", 1)[0]
+        if not isinstance(value, dict) or value.get("provider") != provider:
+            continue
+        name = value.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        profiles[account_id] = {"provider": provider, "name": name.strip()[:80]}
+    return profiles
+
+
+def data_root() -> Path:
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "agent-usage-plus-accounts"
+
+
+def usage_dir() -> Path:
+    return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "omarchy/agents/usage"
+
+
+def account_directory(account_id: str) -> Path:
+    root = data_root()
+    directory = root / account_id
+    for path in (root, directory):
+        if path.is_symlink():
+            raise ValueError("Account directory cannot be a symlink")
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return directory
+
+
+def collector_environment(account_id: str, provider: str) -> dict[str, str]:
+    directory = account_directory(account_id)
+    environment = os.environ.copy()
+    for name in AUTH_ENV[provider]:
+        environment.pop(name, None)
+    # The upstream scanners also count ~/.pi, ~/.omp and the shared OpenCode
+    # database. A private scan HOME makes those unassignable sources empty;
+    # the native CLI directory remains the same one used by the real login.
+    scan_home = directory / "scan-home"
+    scan_data = directory / "scan-data"
+    scan_cache = directory / "scan-cache"
+    for path in (scan_home, scan_data, scan_cache):
+        if path.is_symlink():
+            raise ValueError("Account scan directory cannot be a symlink")
+        path.mkdir(mode=0o700, exist_ok=True)
+    environment.update(HOME=str(scan_home), XDG_DATA_HOME=str(scan_data), XDG_CACHE_HOME=str(scan_cache))
+    if provider == "claude":
+        environment["CLAUDE_CONFIG_DIR"] = str(directory / "claude")
+        original_home = Path.home()
+        saved = original_home / ".local/bin/agent-usage-plus-base-claude"
+        environment["AGENT_USAGE_PLUS_CLAUDE_BASE_COLLECTOR"] = str(saved if saved.is_file() else Path("/usr/share/omarchy/bin/omarchy-agent-usage-claude"))
+    else:
+        codex_home = directory / "codex"
+        if codex_home.is_symlink():
+            raise ValueError("Codex directory cannot be a symlink")
+        codex_home.mkdir(mode=0o700, exist_ok=True)
+        config = codex_home / "config.toml"
+        if config.is_symlink():
+            raise ValueError("Codex config cannot be a symlink")
+        if not config.exists():
+            config.write_text('cli_auth_credentials_store = "file"\n', encoding="utf-8")
+            config.chmod(0o600)
+        environment["CODEX_HOME"] = str(codex_home)
+        original_home = Path.home()
+        saved = original_home / ".local/bin/agent-usage-plus-base-codex"
+        environment["AGENT_USAGE_PLUS_CODEX_BASE_COLLECTOR"] = str(saved if saved.is_file() else Path("/usr/share/omarchy/bin/omarchy-agent-usage-codex"))
+    return environment
+
+
+def collect(account_id: str, profile: dict[str, str], flags: list[str]) -> dict:
+    provider = profile["provider"]
+    environment = collector_environment(account_id, provider)
+    collector = ROOT / "bin" / f"omarchy-agent-usage-{provider}-cost"
+    with tempfile.TemporaryFile(mode="w+b") as output:
+        subprocess.run([str(collector), *flags], env=environment, stdout=output,
+                       stderr=subprocess.DEVNULL, timeout=120, check=True)
+        output.seek(0)
+        raw = output.read(MAX_RECORD_BYTES + 1)
+    if len(raw) > MAX_RECORD_BYTES:
+        raise ValueError("Collector record is too large")
+    record = json.loads(raw)
+    if not isinstance(record, dict) or record.get("id") != provider:
+        raise ValueError("Collector returned an invalid record")
+    display_name = ("Claude" if provider == "claude" else "Codex") + " · " + profile["name"]
+    record.update(id=account_id, name=display_name[:80], brand=provider,
+                  managedBy="agent-usage-plus-accounts")
+    return record
+
+
+def publish(account_id: str, record: dict) -> None:
+    destination = usage_dir()
+    destination.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=destination,
+                                     prefix=f".{account_id}.", delete=False) as handle:
+        json.dump(record, handle, separators=(",", ":"))
+        handle.write("\n")
+        temporary = Path(handle.name)
+    temporary.chmod(0o600)
+    temporary.replace(destination / f"{account_id}.json")
+
+
+def remove_unconfigured_records(profiles: dict[str, dict[str, str]]) -> None:
+    directory = usage_dir()
+    if not directory.is_dir():
+        return
+    for path in directory.glob("*.json"):
+        if not PROFILE_ID.fullmatch(path.stem) or path.stem in profiles or path.is_symlink():
+            continue
+        try:
+            if path.stat().st_size > MAX_RECORD_BYTES:
+                continue
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(record, dict) and record.get("id") == path.stem \
+                    and record.get("managedBy") == "agent-usage-plus-accounts":
+                path.unlink()
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--profiles-json", required=True)
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--limits-only", action="store_true")
+    parser.add_argument("--except", dest="excluded", action="append", default=[])
+    parser.add_argument("accounts", nargs="*")
+    args = parser.parse_intermixed_args(argv)
+    try:
+        profiles = profiles_from_json(args.profiles_json)
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(f"agent-usage-plus-accounts: {exc}", file=sys.stderr)
+        return 2
+    remove_unconfigured_records(profiles)
+    flags = ["--force"] if args.force else (["--limits-only"] if args.limits_only else [])
+    wanted = set(args.accounts) if args.accounts else None
+    for account_id, profile in profiles.items():
+        if account_id in args.excluded or (wanted is not None and account_id not in wanted):
+            continue
+        try:
+            publish(account_id, collect(account_id, profile, flags))
+        except (OSError, ValueError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+            print(f"agent-usage-plus-accounts: {account_id} collection failed ({type(exc).__name__})", file=sys.stderr)
+            publish(account_id, {
+                "schemaVersion": 1, "id": account_id, "brand": profile["provider"],
+                "name": (("Claude" if profile["provider"] == "claude" else "Codex") + " · " + profile["name"])[:80],
+                "managedBy": "agent-usage-plus-accounts", "ready": False,
+                "usageStatusText": "Collector unavailable",
+                "authHelpText": "Check that the CLI is installed, then refresh.",
+            })
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

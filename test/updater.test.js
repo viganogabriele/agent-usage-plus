@@ -112,6 +112,22 @@ test("plugin updater adds Devin without running every bundled collector", t => {
   assert.equal(baseCall, "base:--force devin --except kimi --except devin")
 })
 
+test("plugin updater keeps account settings out of Omarchy's updater arguments", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-usage-accounts-updater-"))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const base = path.join(root, "base-updater")
+  const bundled = path.join(root, "bundled-runner")
+  const calls = path.join(root, "calls")
+  executable(base, `printf 'base:%s\n' "$*" >>"${calls}"`)
+  executable(bundled, `printf 'bundled:%s\n' "$*" >>"${calls}"`)
+  execFileSync("bash", [pluginUpdater, "--force", "--profiles-json", "{}", "claude-work"], {
+    env: { ...process.env, XDG_STATE_HOME: path.join(root, "state"),
+      AGENT_USAGE_PLUS_BASE_UPDATER: base, AGENT_USAGE_PLUS_BUNDLED_RUNNER: bundled },
+  })
+  assert.match(fs.readFileSync(calls, "utf8"), /base:--force claude-work --except devin/)
+  assert.doesNotMatch(fs.readFileSync(calls, "utf8"), /profiles-json/)
+})
+
 test("plugin updater reaches the real packaged updater through an installed --codex-cli-compat override, not itself", t => {
   // Regression for a reviewed-but-unreproduced recursion concern: the
   // plugin dispatcher's own local_updater auto-detection (no
