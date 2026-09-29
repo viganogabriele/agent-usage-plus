@@ -49,6 +49,10 @@ Requires Omarchy with Quickshell plugin support. The plugin has no other
 runtime dependency; optional collector setup is documented in
 [collectors/README.md](collectors/README.md).
 
+In Settings, add multiple Claude or Codex accounts, sign in to each once, and
+choose which account the bar launches. Opening either provider shows each
+account's limits. See [multi-account setup](docs/multi-account.md).
+
 The widget follows Omarchy's live theme. An optional traffic-light palette uses
 green, amber, and red for Healthy, Warn, and Critical meters. Notifications are
 off by default; when enabled, each provider alerts once at Warn and once at

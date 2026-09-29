@@ -6,6 +6,7 @@ set -u
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 base_updater=${AGENT_USAGE_PLUS_BASE_UPDATER:-}
 bundled_runner=${AGENT_USAGE_PLUS_BUNDLED_RUNNER:-"$script_dir/agent-usage-plus-collectors"}
+account_runner="$script_dir/agent-usage-plus-accounts"
 
 if [[ -z $base_updater ]]; then
   local_updater=${XDG_BIN_HOME:-"$HOME/.local/bin"}/omarchy-agent-usage-update
@@ -19,7 +20,19 @@ fi
 flags=()
 only=()
 devin_excluded=false
-args=("$@")
+args=()
+profiles_json='{}'
+profiles_supplied=false
+while (($#)); do
+  if [[ $1 == --profiles-json ]]; then
+    profiles_json=${2:-'{}'}
+    profiles_supplied=true
+    shift 2
+  else
+    args+=("$1")
+    shift
+  fi
+done
 for ((index = 0; index < ${#args[@]}; index++)); do
   case ${args[$index]} in
     --force | --limits-only) flags+=("${args[$index]}") ;;
@@ -42,14 +55,21 @@ elif ((${#only[@]} > 0)); then
 fi
 
 status=0
-"$base_updater" "$@" --except devin &
+"$base_updater" "${args[@]}" --except devin &
 base_pid=$!
+if $profiles_supplied; then
+  "$account_runner" --profiles-json "$profiles_json" "${args[@]}" &
+  account_pid=$!
+fi
 if $devin_wanted; then
   "$bundled_runner" update "${flags[@]}" devin &
   bundled_pid=$!
 fi
 
 wait "$base_pid" || status=1
+if [[ -n ${account_pid:-} ]]; then
+  wait "$account_pid" || status=1
+fi
 if [[ -n ${bundled_pid:-} ]]; then
   wait "$bundled_pid" || status=1
 fi
