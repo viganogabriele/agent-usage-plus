@@ -21,11 +21,12 @@ function boundedDayCount(value) {
 }
 
 function tokenTotal(cost) {
+  var accounted = nonnegative(cost && cost.pricedTokens) + nonnegative(cost && cost.unpricedTokens)
+  if (accounted > 0) return accounted
   var rows = cost && Array.isArray(cost.byModel) ? cost.byModel : []
   var total = 0
   for (var i = 0; i < rows.length; i++) total += nonnegative(rows[i] && rows[i].tokens)
-  if (total > 0) return total
-  return nonnegative(cost && cost.pricedTokens) + nonnegative(cost && cost.unpricedTokens)
+  return total
 }
 
 function recordedDayCount(cost, provider) {

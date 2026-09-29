@@ -2151,7 +2151,7 @@ Panel {
 
                 Text {
                   width: parent.width
-                  text: "Plan usage next to a published API-rate equivalent"
+                  text: "Estimated at published API rates · periods vary by provider"
                   textFormat: Text.PlainText
                   color: root.dim
                   font.family: root.fontFamily
@@ -2189,7 +2189,7 @@ Panel {
 
                   Text {
                     id: providerApiColumn
-                    text: "IF API"
+                    text: "API EST."
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
@@ -2279,6 +2279,22 @@ Panel {
                       anchors.topMargin: Style.space(4)
                     }
 
+                    Text {
+                      width: providerCostApiValue.width
+                      text: !providerCostRow.modelData.hasCost ? "No estimate"
+                        : (providerCostRow.modelData.incomplete ? "Partial" : "Estimate")
+                          + (providerCostRow.modelData.period ? " · " + providerCostRow.modelData.period : "")
+                      textFormat: Text.PlainText
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      horizontalAlignment: Text.AlignRight
+                      elide: Text.ElideRight
+                      anchors.right: parent.right
+                      anchors.top: providerCostApiValue.bottom
+                      anchors.topMargin: Style.space(1)
+                    }
+
                     Rectangle {
                       id: providerUsageTrack
                       visible: Number(providerCostRow.modelData.usagePercent) >= 0
@@ -2308,9 +2324,6 @@ Panel {
               id: costValueCard
               visible: !!root.provider
               width: parent.width
-              // Give this information-dense card the same generous breathing
-              // room as the provider overview above it. The extra vertical
-              // space improves scanability without hiding any analytics.
               implicitHeight: costValueContent.implicitHeight + Style.space(36)
               color: root.alpha(root.foreground, 0.035)
               borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
@@ -2327,17 +2340,33 @@ Panel {
 
                 PanelSectionHeader {
                   width: parent.width
-                  text: "API equivalent" + (root.cost && root.cost.period ? " · " + root.cost.period : "")
+                  text: "If billed by API" + (root.cost && root.cost.period ? " · " + root.cost.period : "")
                   foreground: root.foreground
                   fontFamily: root.fontFamily
                 }
 
                 Text {
-                  // Only worth a full line here when there's something
-                  // actionable to say: a partial estimate, or no priced data
-                  // at all. The "not a bill" disclaimer for the normal,
-                  // fully-priced case is already implied by the "API
-                  // equivalent" section header, so that case shows nothing.
+                  width: parent.width
+                  text: root.cost ? root.formatUsd(root.cost.estimateUsd) : "—"
+                  textFormat: Text.PlainText
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.display
+                  font.bold: true
+                  elide: Text.ElideRight
+                }
+
+                Text {
+                  width: parent.width
+                  text: "Estimated at published API rates · not a bill"
+                  textFormat: Text.PlainText
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
+                }
+
+                Text {
                   id: costDisclosure
                   visible: !!root.provider && (!root.cost || root.cost.incomplete)
                   width: parent.width
@@ -2354,27 +2383,17 @@ Panel {
                 Row {
                   id: costMetrics
                   width: parent.width
-                  spacing: Style.space(14)
+                  spacing: Style.space(10)
 
                   CostMetric {
-                    width: (costMetrics.width - costMetrics.spacing * 2) / 3
+                    width: (costMetrics.width - costMetrics.spacing) / 2
                     valueText: root.costPlanValue(root.costProviderRow(root.provider))
                     label: root.costPlanLabel(root.costProviderRow(root.provider))
                     hint: root.costPlanHint(root.costProviderRow(root.provider))
                   }
 
                   CostMetric {
-                    width: (costMetrics.width - costMetrics.spacing * 2) / 3
-                    valueText: root.cost ? root.formatUsd(root.cost.estimateUsd) : "—"
-                    label: "API equivalent"
-                    // The disclosure above already explains the estimate;
-                    // repeating "published-rate" in this small tile adds
-                    // noise without adding information.
-                    hint: ""
-                  }
-
-                  CostMetric {
-                    width: (costMetrics.width - costMetrics.spacing * 2) / 3
+                    width: (costMetrics.width - costMetrics.spacing) / 2
                     valueText: root.costSummary && root.costSummary.hasDailyAverage
                       ? root.formatUsd(root.costSummary.averageDailyUsd) : "—"
                     label: "Avg / day"

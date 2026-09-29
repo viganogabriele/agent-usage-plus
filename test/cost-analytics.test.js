@@ -58,6 +58,7 @@ test("summary exposes useful totals, active-day average, peak, and price coverag
   assert.equal(result.dailyActiveDays, 2)
   assert.equal(result.averageDailyUsd, 1.125)
   assert.equal(result.coverage, 0.9)
+  assert.equal(result.totalTokens, 1000)
   assert.equal(result.topModel, "top")
 })
 
