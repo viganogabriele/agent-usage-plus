@@ -49,6 +49,24 @@ test("local updater leaves an excluded Codex untouched", t => {
   assert.equal(fs.existsSync(result.record), false)
 })
 
+test("plugin refresh uses the Codex compatibility updater without a separate install", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-usage-default-codex-"))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const packaged = path.join(root, "packaged")
+  const codex = path.join(root, "codex")
+  const calls = path.join(root, "calls")
+  executable(packaged, `printf 'packaged:%s\\n' "$*" >>"${calls}"`)
+  executable(codex, `printf 'codex:%s\\n' "$*" >>"${calls}"; printf '%s\\n' '{"id":"codex","limits":[{"percent":0.2}]}'`)
+  execFileSync("bash", [pluginUpdater, "--force", "codex"], {
+    env: { ...process.env, AGENT_USAGE_PLUS_BASE_UPDATER: "", XDG_BIN_HOME: path.join(root, "missing-bin"),
+      XDG_STATE_HOME: path.join(root, "state"), AGENT_USAGE_PLUS_PACKAGED_UPDATER: packaged,
+      AGENT_USAGE_PLUS_CODEX_COLLECTOR: codex },
+  })
+  assert.deepEqual(fs.readFileSync(calls, "utf8").trim().split("\n").sort(),
+    ["codex:--force", "packaged:--except codex --force codex --except devin"])
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root, "state/omarchy/agents/usage/codex.json"))).limits[0].percent, 0.2)
+})
+
 test("a failing packaged updater still lets the Codex refresh land", t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-usage-updater-"))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
@@ -110,6 +128,22 @@ test("plugin updater adds Devin without running every bundled collector", t => {
   assert.ok(lines.includes("bundled:update --force devin"))
   const baseCall = lines.find(line => line.startsWith("base:"))
   assert.equal(baseCall, "base:--force devin --except kimi --except devin")
+})
+
+test("plugin updater keeps account settings out of Omarchy's updater arguments", t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-usage-accounts-updater-"))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const base = path.join(root, "base-updater")
+  const bundled = path.join(root, "bundled-runner")
+  const calls = path.join(root, "calls")
+  executable(base, `printf 'base:%s\n' "$*" >>"${calls}"`)
+  executable(bundled, `printf 'bundled:%s\n' "$*" >>"${calls}"`)
+  execFileSync("bash", [pluginUpdater, "--force", "--profiles-json", "{}", "claude-work"], {
+    env: { ...process.env, XDG_STATE_HOME: path.join(root, "state"),
+      AGENT_USAGE_PLUS_BASE_UPDATER: base, AGENT_USAGE_PLUS_BUNDLED_RUNNER: bundled },
+  })
+  assert.match(fs.readFileSync(calls, "utf8"), /base:--force claude-work --except devin/)
+  assert.doesNotMatch(fs.readFileSync(calls, "utf8"), /profiles-json/)
 })
 
 test("plugin updater reaches the real packaged updater through an installed --codex-cli-compat override, not itself", t => {

@@ -566,6 +566,12 @@ test("selectBarLayout: fixed providers consume slots before rotating providers",
   assert.equal(layout.cycleSlots, 1)
 })
 
+test("selectBarLayout: configured account records are not cut off at ten", () => {
+  const providers = providerList(...Array.from({ length: 12 }, (_, i) => `claude-account-${i}`))
+  const layout = Aggregate.selectBarLayout(providers, {}, "roles", 0, 0, 999)
+  assert.equal(layout.providers.length, 12)
+})
+
 function providerWithPercent(id, percent) {
   return { providerId: id, limits: [{ label: "Session", title: "Session", percent: percent, resetsAt: "" }] }
 }

@@ -9,6 +9,7 @@ import "logic/format.js" as Format
 import "logic/aggregate.js" as Aggregate
 import "logic/history.js" as History
 import "logic/agents.js" as Agents
+import "logic/accounts.js" as Accounts
 import "logic/pace.js" as Pace
 import "logic/cost-analytics.js" as CostAnalytics
 import "logic/notifications.js" as Notify
@@ -62,6 +63,23 @@ Panel {
     return 0
   }
   readonly property var provider: providers.length > 0 ? providers[providerIndex] : null
+  readonly property string accountBrand: provider ? (provider.brand || provider.providerId) : ""
+  readonly property var accountRows: providers.filter(function(p) {
+    return (p.brand || p.providerId) === root.accountBrand
+  })
+  readonly property var configuredAccounts: {
+    var rows = []
+    var profiles = usage.accountProfiles
+    for (var id in profiles) rows.push({ id: id, provider: profiles[id].provider, name: profiles[id].name, path: profiles[id].path || "" })
+    return rows.sort(function(a, b) { return a.id.localeCompare(b.id) })
+  }
+  function accountRecordExists(id) {
+    var revision = usage.dataRevision
+    var agents = usage.agents || []
+    for (var i = 0; i < agents.length; i++)
+      if (agents[i] && agents[i].record && agents[i].record.id === id) return true
+    return false
+  }
 
   property bool cursorActive: false
 
@@ -351,7 +369,20 @@ Panel {
   // omarchy-agent reads ~/.config/omarchy/defaults/agent, which is the only
   // sensible answer when the click doesn't name a provider.
   function launchAgent(providerId) {
-    if (root.bar) root.bar.run(Agents.launchCommandFor(providerId))
+    var profile = usage.accountProfiles[providerId]
+    var command = profile
+      ? Accounts.commandForProfile(providerId, profile.provider, usage.accountDataRoot, false, profile.path, usage.home) : ""
+    if (root.bar) root.bar.run(command
+      ? Agents.WORKDIR_GUARD + Agents.LAUNCH_PREFIX + " " + command
+      : Agents.launchCommandFor(providerId))
+    root.close()
+  }
+
+  function loginToAccount(accountId) {
+    var profile = usage.accountProfiles[accountId]
+    if (!profile || !root.bar) return
+    var command = Accounts.commandForProfile(accountId, profile.provider, usage.accountDataRoot, true, profile.path, usage.home)
+    if (command) root.bar.run(Agents.WORKDIR_GUARD + Agents.LAUNCH_PREFIX + " " + command)
     root.close()
   }
 
@@ -898,6 +929,13 @@ Panel {
     // calls, including its queue and visible result state.
     function testNotification(): string { root.sendTestNotification(); return "queued" }
     function notificationStatus(): string { return root.notificationTestStatus }
+    function importCodexPaths(paths: string): string {
+      usage.importAccounts("codex", paths)
+      return "queued"
+    }
+    function accountStatus(): string {
+      return JSON.stringify({ profiles: usage.accountProfiles, status: usage.accountImportStatus })
+    }
   }
 
   // The provider's primary window: session when it reports one (Claude),
@@ -1670,6 +1708,57 @@ Panel {
                   color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.display
+                }
+              }
+            }
+          }
+
+          Column {
+            id: accountComparison
+            visible: (root.accountBrand === "claude" || root.accountBrand === "codex")
+              && root.accountRows.length > 1 && !root.settingsOpen
+            width: parent.width
+            spacing: Style.space(6)
+
+            PanelSectionHeader {
+              width: parent.width
+              text: root.accountBrand === "claude" ? "Claude accounts" : "Codex accounts"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Repeater {
+              model: root.accountRows
+
+              Row {
+                id: accountRow
+                required property var modelData
+                width: accountComparison.width
+                spacing: Style.space(8)
+
+                Button {
+                  width: parent.width - useAccountButton.width - parent.spacing
+                  text: accountRow.modelData.providerName + "  ·  " + root.providerPercentText(accountRow.modelData)
+                  tooltipText: "Show limits for " + accountRow.modelData.providerName
+                  selected: root.selectedProviderId === accountRow.modelData.providerId
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.bodySmall
+                  onClicked: root.selectedProviderId = accountRow.modelData.providerId
+                }
+
+                Button {
+                  id: useAccountButton
+                  width: Style.space(68)
+                  text: usage.activeAccountId(root.accountBrand) === accountRow.modelData.providerId ? "Active" : "Use"
+                  tooltipText: "Choose this account for the bar"
+                  selected: usage.activeAccountId(root.accountBrand) === accountRow.modelData.providerId
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.caption
+                  onClicked: usage.selectAccount(root.accountBrand, accountRow.modelData.providerId)
                 }
               }
             }
@@ -3027,6 +3116,205 @@ Panel {
               text: "SETTINGS"
               foreground: root.foreground
               fontFamily: root.fontFamily
+            }
+
+            BorderSurface {
+              id: accountSettings
+              width: parent.width
+              implicitHeight: accountSettingsContent.implicitHeight + Style.space(28)
+              color: root.alpha(root.foreground, 0.035)
+              borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+              radius: Style.cornerRadius
+
+              Column {
+                id: accountSettingsContent
+                anchors.fill: parent
+                anchors.margins: Style.space(14)
+                spacing: Style.space(10)
+                property string newProvider: "codex"
+                function addNewAccount() {
+                  if (usage.addAccount(newProvider, accountNameInput.text)) accountNameInput.text = ""
+                }
+
+                Text {
+                  text: "Accounts"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                }
+
+                Text {
+                  width: parent.width
+                  text: "Import existing CLI accounts from one or more paths, or create a new account below. Each account keeps its own login and limits."
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
+                }
+
+                Row {
+                  spacing: Style.space(6)
+
+                  Repeater {
+                    model: ["claude", "codex"]
+                    Button {
+                      required property string modelData
+                      text: modelData === "claude" ? "Claude" : "Codex"
+                      selected: accountSettingsContent.newProvider === modelData
+                      bordered: true
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.caption
+                      onClicked: accountSettingsContent.newProvider = modelData
+                    }
+                  }
+                }
+
+                Rectangle {
+                  width: parent.width
+                  height: Style.space(78)
+                  radius: Style.cornerRadius
+                  color: root.alpha(root.foreground, 0.06)
+                  border.width: 1
+                  border.color: root.alpha(root.foreground, accountPathsInput.activeFocus ? 0.4 : 0.2)
+
+                  TextEdit {
+                    id: accountPathsInput
+                    anchors.fill: parent
+                    anchors.margins: Style.space(8)
+                    clip: true
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    textFormat: TextEdit.PlainText
+                    wrapMode: TextEdit.WrapAnywhere
+                    selectByMouse: true
+
+                    Text {
+                      visible: accountPathsInput.text === "" && !accountPathsInput.activeFocus
+                      text: "Existing account paths, one per line\nExample: ~/.codex-t3/ (imports its accounts)"
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                  }
+                }
+
+                Button {
+                  text: usage.accountImportRunning ? "Importing…" : "Import paths"
+                  enabled: accountPathsInput.text.trim().length > 0 && !usage.accountImportRunning
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.caption
+                  onClicked: usage.importAccounts(accountSettingsContent.newProvider, accountPathsInput.text)
+                }
+
+                Text {
+                  width: parent.width
+                  visible: usage.accountImportStatus !== ""
+                  text: usage.accountImportStatus
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Row {
+                  width: parent.width
+                  spacing: Style.space(8)
+
+                  Rectangle {
+                    width: parent.width - addAccountButton.width - parent.spacing
+                    height: Style.space(32)
+                    radius: Style.cornerRadius
+                    color: root.alpha(root.foreground, 0.06)
+                    border.width: 1
+                    border.color: root.alpha(root.foreground, accountNameInput.activeFocus ? 0.4 : 0.2)
+
+                    TextInput {
+                      id: accountNameInput
+                      anchors.fill: parent
+                      anchors.leftMargin: Style.space(8)
+                      anchors.rightMargin: Style.space(8)
+                      verticalAlignment: TextInput.AlignVCenter
+                      clip: true
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      maximumLength: 80
+                      onAccepted: accountSettingsContent.addNewAccount()
+
+                      Text {
+                        visible: accountNameInput.text === "" && !accountNameInput.activeFocus
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Account name, e.g. Work"
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                      }
+                    }
+                  }
+
+                  Button {
+                    id: addAccountButton
+                    text: "Add"
+                    enabled: accountNameInput.text.trim().length > 0
+                    selected: enabled
+                    bordered: true
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    fontSize: Style.font.caption
+                    onClicked: accountSettingsContent.addNewAccount()
+                  }
+                }
+
+                Repeater {
+                  model: root.configuredAccounts
+
+                  Row {
+                    id: configuredAccountRow
+                    required property var modelData
+                    width: accountSettingsContent.width
+                    spacing: Style.space(8)
+
+                    Text {
+                      width: parent.width - loginButton.width - removeButton.width - Style.space(16)
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: configuredAccountRow.modelData.name + (configuredAccountRow.modelData.path ? "\n" + configuredAccountRow.modelData.path : "")
+                      textFormat: Text.PlainText
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      elide: Text.ElideRight
+                    }
+
+                    Button {
+                      id: loginButton
+                      text: enabled ? "Sign in" : "Preparing…"
+                      enabled: root.accountRecordExists(configuredAccountRow.modelData.id)
+                      bordered: true
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.caption
+                      onClicked: root.loginToAccount(configuredAccountRow.modelData.id)
+                    }
+
+                    Button {
+                      id: removeButton
+                      text: "Remove"
+                      tooltipText: "Remove from the widget; keep the CLI login directory"
+                      bordered: true
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.caption
+                      onClicked: usage.removeAccount(configuredAccountRow.modelData.id)
+                    }
+                  }
+                }
+              }
             }
 
             // ----- Per-provider controls -----

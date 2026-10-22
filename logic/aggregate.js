@@ -621,7 +621,9 @@ function selectBarLayout(providers, settings, mode, cycleIndex, cycleSlots, slot
 
   var limit = Number(slotLimit)
   if (!isFinite(limit) || limit < 0) limit = 3
-  limit = Math.max(0, Math.min(10, Math.floor(limit)))
+  // Account profiles can add records beyond the bundled collector count.
+  // The eligible list is the real upper bound on visible bar providers.
+  limit = Math.max(0, Math.min(eligible.length, Math.floor(limit)))
 
   if (!cycleMode) {
     return {

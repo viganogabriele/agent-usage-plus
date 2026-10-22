@@ -1,5 +1,12 @@
 # Agent Usage Plus collectors
 
+Additional Claude and Codex profiles configured in the widget are refreshed
+by the plugin's local updater. Each profile gets a separate record with its
+own limits and native session totals; setup is in
+[multi-account setup](../docs/multi-account.md). The standalone
+`agent-usage-plus-collectors` timer continues to serve the other bundled
+providers.
+
 This is the plugin's **supported companion package** for providers with a
 useful account budget or subscription-usage source. It is dependency-free
 Python (3.10+) and does not send a credential anywhere other than the

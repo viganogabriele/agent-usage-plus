@@ -37,6 +37,32 @@ PACKAGED_COLLECTOR = Path(
 # when the surrounding source no longer matches what the patch expects.
 PATCHES = [
     (
+        '    ready, _, _ = select.select([proc.stdout], [], [], 0.25)\n'
+        '    if not ready:\n'
+        '      continue\n'
+        '    line = proc.stdout.readline()\n'
+        '    if not line:\n'
+        '      break',
+        # Read the fd directly: TextIOWrapper.readline() can prefetch the
+        # reply while returning a notification. select() then sees an empty
+        # fd although the reply is sitting in Python's text buffer.
+        '    pending = getattr(proc, "_omarchy_rpc_pending", b"")\n'
+        '    if b"\\n" not in pending:\n'
+        '      ready, _, _ = select.select([proc.stdout], [], [], min(0.25, max(0, deadline - time.time())))\n'
+        '      if not ready:\n'
+        '        continue\n'
+        '      chunk = os.read(proc.stdout.fileno(), 65536)\n'
+        '      if not chunk:\n'
+        '        break\n'
+        '      pending += chunk\n'
+        '      if len(pending) > 1048576:\n'
+        '        raise ValueError("Codex RPC response is too large")\n'
+        '      proc._omarchy_rpc_pending = pending\n'
+        '      if b"\\n" not in pending:\n'
+        '        continue\n'
+        '    line, proc._omarchy_rpc_pending = pending.split(b"\\n", 1)',
+    ),
+    (
         '[codex, "-s", "read-only", "-a", "untrusted", "app-server"]',
         '[codex, "-s", "read-only", "-a", "never", "app-server"]',
     ),
