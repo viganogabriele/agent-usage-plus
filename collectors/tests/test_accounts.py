@@ -17,6 +17,32 @@ loader.exec_module(accounts)
 
 
 class AccountCollectorTests(unittest.TestCase):
+    def test_existing_paths_survive_settings_and_do_not_create_or_change_config(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            native = Path(temporary) / "existing"
+            native.mkdir()
+            config = native / "config.toml"
+            config.write_text('# user config\n')
+            profiles = accounts.profiles_from_json(json.dumps({
+                "codex-personal": {"provider": "codex", "name": "Personal", "path": str(native)}
+            }))
+            self.assertEqual(profiles["codex-personal"]["path"], str(native))
+            with patch.dict(os.environ, {"XDG_DATA_HOME": temporary}):
+                environment = accounts.collector_environment("codex-personal", "codex", str(native))
+            self.assertEqual(environment["CODEX_HOME"], str(native))
+            self.assertEqual(config.read_text(), '# user config\n')
+
+    def test_discovers_direct_homes_and_containers_without_reading_credentials(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("personal", "work"):
+                (root / name).mkdir()
+                (root / name / "auth.json").write_text("not JSON; must never be parsed")
+            (root / "unrelated").mkdir()
+            found = accounts.discover_paths([str(root), str(root / "personal")], "codex")
+            self.assertEqual([p["name"] for p in found], ["personal", "work"])
+            self.assertEqual([p["path"] for p in found], [str(root / "personal"), str(root / "work")])
+
     def test_profiles_only_accept_safe_matching_account_ids(self):
         parsed = accounts.profiles_from_json(json.dumps({
             "claude-work": {"provider": "claude", "name": "Claude · Work"},

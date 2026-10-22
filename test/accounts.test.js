@@ -3,6 +3,16 @@ const test = require("node:test")
 const assert = require("node:assert/strict")
 const Accounts = require("../logic/accounts.js")
 
+test("existing account directories survive settings and select the same CLI home", () => {
+  const profiles = Accounts.normalizeProfiles({
+    "codex-personal": { provider: "codex", name: "Personal", path: "~/.codex-t3/personal" }
+  })
+  assert.equal(profiles["codex-personal"].path, "~/.codex-t3/personal")
+  const command = Accounts.commandForProfile("codex-personal", "codex", "/tmp/data", false,
+    profiles["codex-personal"].path, "/home/user")
+  assert.match(command, /CODEX_HOME='\/home\/user\/\.codex-t3\/personal' codex$/)
+})
+
 test("profiles retain only named Claude and Codex accounts with safe ids", () => {
   assert.deepEqual(Accounts.normalizeProfiles({
     "claude-work": { provider: "claude", name: " Work " },

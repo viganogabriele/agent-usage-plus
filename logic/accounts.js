@@ -18,7 +18,10 @@ function normalizeProfiles(raw) {
     var provider = id.split("-")[0]
     if (!profile || profile.provider !== provider || typeof profile.name !== "string") continue
     var name = profile.name.trim().slice(0, 80)
-    if (name) result[id] = { provider: provider, name: name }
+    if (name) {
+      result[id] = { provider: provider, name: name }
+      if (typeof profile.path === "string" && profile.path.trim()) result[id].path = profile.path.trim()
+    }
   }
   return result
 }
@@ -36,15 +39,16 @@ function nextProfileId(provider, name, existing) {
 
 function quote(value) { return "'" + String(value).replace(/'/g, "'\\''") + "'" }
 
-function commandForProfile(id, provider, dataRoot, login) {
+function commandForProfile(id, provider, dataRoot, login, path, home) {
   if (!PROFILE_ID.test(id) || id.split("-")[0] !== provider) return ""
   var directory = String(dataRoot || "") + "/agent-usage-plus-accounts/" + id
+  var native = path ? String(path).replace(/^~(?=\/|$)/, function() { return String(home || "") }) : directory + "/" + provider
   var cleanEnv = "env " + AUTH_ENV[provider].map(function(name) { return "-u " + name }).join(" ") + " "
   if (provider === "claude")
-    return cleanEnv + "CLAUDE_CONFIG_DIR=" + quote(directory + "/claude")
+    return cleanEnv + "CLAUDE_CONFIG_DIR=" + quote(native)
       + " claude" + (login ? " auth login" : " --permission-mode auto")
-  return cleanEnv + "CODEX_HOME=" + quote(directory + "/codex")
-    + " codex" + (login ? " login -c cli_auth_credentials_store=file" : " -c cli_auth_credentials_store=file --approve-for-me")
+  return cleanEnv + "CODEX_HOME=" + quote(native)
+    + " codex" + (login ? " login" : "") + (path ? "" : " -c cli_auth_credentials_store=file")
 }
 
 if (typeof module !== "undefined" && module.exports)

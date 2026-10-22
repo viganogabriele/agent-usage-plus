@@ -70,7 +70,7 @@ Panel {
   readonly property var configuredAccounts: {
     var rows = []
     var profiles = usage.accountProfiles
-    for (var id in profiles) rows.push({ id: id, provider: profiles[id].provider, name: profiles[id].name })
+    for (var id in profiles) rows.push({ id: id, provider: profiles[id].provider, name: profiles[id].name, path: profiles[id].path || "" })
     return rows.sort(function(a, b) { return a.id.localeCompare(b.id) })
   }
   function accountRecordExists(id) {
@@ -371,7 +371,7 @@ Panel {
   function launchAgent(providerId) {
     var profile = usage.accountProfiles[providerId]
     var command = profile
-      ? Accounts.commandForProfile(providerId, profile.provider, usage.accountDataRoot, false) : ""
+      ? Accounts.commandForProfile(providerId, profile.provider, usage.accountDataRoot, false, profile.path, usage.home) : ""
     if (root.bar) root.bar.run(command
       ? Agents.WORKDIR_GUARD + Agents.LAUNCH_PREFIX + " " + command
       : Agents.launchCommandFor(providerId))
@@ -381,7 +381,7 @@ Panel {
   function loginToAccount(accountId) {
     var profile = usage.accountProfiles[accountId]
     if (!profile || !root.bar) return
-    var command = Accounts.commandForProfile(accountId, profile.provider, usage.accountDataRoot, true)
+    var command = Accounts.commandForProfile(accountId, profile.provider, usage.accountDataRoot, true, profile.path, usage.home)
     if (command) root.bar.run(Agents.WORKDIR_GUARD + Agents.LAUNCH_PREFIX + " " + command)
     root.close()
   }
@@ -929,6 +929,13 @@ Panel {
     // calls, including its queue and visible result state.
     function testNotification(): string { root.sendTestNotification(); return "queued" }
     function notificationStatus(): string { return root.notificationTestStatus }
+    function importCodexPaths(paths: string): string {
+      usage.importAccounts("codex", paths)
+      return "queued"
+    }
+    function accountStatus(): string {
+      return JSON.stringify({ profiles: usage.accountProfiles, status: usage.accountImportStatus })
+    }
   }
 
   // The provider's primary window: session when it reports one (Claude),
@@ -3105,7 +3112,7 @@ Panel {
                 anchors.fill: parent
                 anchors.margins: Style.space(14)
                 spacing: Style.space(10)
-                property string newProvider: "claude"
+                property string newProvider: "codex"
                 function addNewAccount() {
                   if (usage.addAccount(newProvider, accountNameInput.text)) accountNameInput.text = ""
                 }
@@ -3120,7 +3127,7 @@ Panel {
 
                 Text {
                   width: parent.width
-                  text: "Add a Claude or Codex account, then sign in once. Each account keeps its own login and limits."
+                  text: "Import existing CLI accounts from one or more paths, or create a new account below. Each account keeps its own login and limits."
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -3143,6 +3150,57 @@ Panel {
                       onClicked: accountSettingsContent.newProvider = modelData
                     }
                   }
+                }
+
+                Rectangle {
+                  width: parent.width
+                  height: Style.space(78)
+                  radius: Style.cornerRadius
+                  color: root.alpha(root.foreground, 0.06)
+                  border.width: 1
+                  border.color: root.alpha(root.foreground, accountPathsInput.activeFocus ? 0.4 : 0.2)
+
+                  TextEdit {
+                    id: accountPathsInput
+                    anchors.fill: parent
+                    anchors.margins: Style.space(8)
+                    clip: true
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    textFormat: TextEdit.PlainText
+                    wrapMode: TextEdit.WrapAnywhere
+                    selectByMouse: true
+
+                    Text {
+                      visible: accountPathsInput.text === "" && !accountPathsInput.activeFocus
+                      text: "Existing account paths, one per line\nExample: ~/.codex-t3/ (imports its accounts)"
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                  }
+                }
+
+                Button {
+                  text: usage.accountImportRunning ? "Importing…" : "Import paths"
+                  enabled: accountPathsInput.text.trim().length > 0 && !usage.accountImportRunning
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.caption
+                  onClicked: usage.importAccounts(accountSettingsContent.newProvider, accountPathsInput.text)
+                }
+
+                Text {
+                  width: parent.width
+                  visible: usage.accountImportStatus !== ""
+                  text: usage.accountImportStatus
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
                 }
 
                 Row {
@@ -3206,7 +3264,7 @@ Panel {
                     Text {
                       width: parent.width - loginButton.width - removeButton.width - Style.space(16)
                       anchors.verticalCenter: parent.verticalCenter
-                      text: configuredAccountRow.modelData.name
+                      text: configuredAccountRow.modelData.name + (configuredAccountRow.modelData.path ? "\n" + configuredAccountRow.modelData.path : "")
                       textFormat: Text.PlainText
                       color: root.foreground
                       font.family: root.fontFamily

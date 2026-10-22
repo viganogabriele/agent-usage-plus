@@ -1,19 +1,28 @@
 # Multiple Claude and Codex accounts
 
-Open the widget's **Settings → Accounts**, choose Claude or Codex, enter a
-recognizable name, and select **Add**. Use **Sign in** on the new row to complete
-the provider's normal browser login once. Back in the usage panel, open Claude
+Open the widget's **Settings → Accounts** and choose Claude or Codex. To use
+existing logins, enter one or more CLI home directories (one per line) and
+select **Import paths**. `~/` is supported. You can also enter a parent directory
+such as `~/.codex-t3/`: its immediate account directories, for example
+`personal` and `polinetwork`, are imported separately. Reimporting the same
+directory does not add another account. Discovery inspects filenames only.
+
+For a new login, enter a recognizable name and select **Add**, then use
+**Sign in** on its row to complete the provider's normal browser login.
+Back in the usage panel, open Claude
 or Codex to compare the accounts' current limits; select a row to see its full
 windows and reset times. **Use** chooses the account shown in the bar. Right
 clicking its bar mark starts a new CLI session with that account.
 
 The original `claude` and `codex` logins remain the default account for each
-provider. Additional logins use directories under
+provider. Imported accounts use their existing directories and configuration;
+the widget does not copy credentials or rewrite their CLI configuration.
+New logins created with **Add** use directories under
 `$XDG_DATA_HOME/agent-usage-plus-accounts/<provider>-<name>` (or
 `~/.local/share/agent-usage-plus-accounts` when XDG_DATA_HOME is unset).
 Claude runs with `CLAUDE_CONFIG_DIR`; Codex runs with `CODEX_HOME` and file-based
 credential storage. The widget stores only account IDs, names, and the active
-choice in its settings. The providers' CLIs handle their own credentials.
+choice, plus imported paths, in its settings. The providers' CLIs handle their own credentials.
 
 Choosing an account affects new CLI sessions launched from the widget. It
 doesn't change terminals or sessions already running, nor a `claude` or
@@ -31,7 +40,8 @@ Claude Code documents separate configuration directories for simultaneous
 accounts. Its documentation notes one exception: two Claude Console sign-ins
 without API keys are not isolated by `CLAUDE_CONFIG_DIR`. Codex can use either
 file or keyring credentials; this feature sets file storage within each
-additional `CODEX_HOME`.
+new `CODEX_HOME` created with **Add**, preserving the credential storage choice
+of imported accounts.
 
 - [Claude Code authentication](https://code.claude.com/docs/en/authentication)
 - [Codex authentication](https://learn.chatgpt.com/docs/auth)

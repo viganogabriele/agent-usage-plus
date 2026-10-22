@@ -49,7 +49,8 @@ Requires Omarchy with Quickshell plugin support. The plugin has no other
 runtime dependency; optional collector setup is documented in
 [collectors/README.md](collectors/README.md).
 
-In Settings, add multiple Claude or Codex accounts, sign in to each once, and
+In Settings, import existing Claude or Codex account directories (one or more
+paths, including a parent such as `~/.codex-t3/`), or add new accounts, and
 choose which account the bar launches. Opening either provider shows each
 account's limits. See [multi-account setup](docs/multi-account.md).
 

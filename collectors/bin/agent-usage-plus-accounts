@@ -44,7 +44,40 @@ def profiles_from_json(raw: str) -> dict[str, dict[str, str]]:
         if not isinstance(name, str) or not name.strip():
             continue
         profiles[account_id] = {"provider": provider, "name": name.strip()[:80]}
+        path = value.get("path")
+        if isinstance(path, str) and path.strip():
+            profiles[account_id]["path"] = path.strip()
     return profiles
+
+
+def discover_paths(paths: list[str], provider: str) -> list[dict[str, str]]:
+    """Inspect filenames only; the provider CLI owns authentication."""
+    found = {}
+    def is_home(path):
+        markers = ("auth.json", "sessions", "archived_sessions", "config.toml") if provider == "codex" else (".credentials.json", "projects")
+        return path.is_dir() and any((path / name).exists() for name in markers)
+    for value in paths:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        root = Path(value.strip()).expanduser()
+        if not root.is_absolute() or not root.is_dir():
+            raise ValueError("Each path must be an existing absolute directory (~/ is supported)")
+        candidates = [root] if is_home(root) else []
+        if not candidates:
+            # Containers are shallow: never crawl session trees or read files.
+            with os.scandir(root) as entries:
+                for index, entry in enumerate(entries):
+                    if index >= 500:
+                        raise ValueError("Too many entries in account directory")
+                    child = Path(entry.path)
+                    if is_home(child):
+                        candidates.append(child)
+        if not candidates:
+            raise ValueError("No CLI accounts found in the supplied directory")
+        for candidate in sorted(candidates):
+            canonical = str(candidate.resolve())
+            found[canonical] = {"provider": provider, "name": candidate.name, "path": canonical}
+    return list(found.values())
 
 
 def data_root() -> Path:
@@ -65,7 +98,10 @@ def account_directory(account_id: str) -> Path:
     return directory
 
 
-def collector_environment(account_id: str, provider: str) -> dict[str, str]:
+def collector_environment(account_id: str, provider: str, path: str = "") -> dict[str, str]:
+    native = Path(path).expanduser() if path else None
+    if native is not None and (not native.is_absolute() or not native.is_dir()):
+        raise ValueError("Account path must be an existing absolute directory")
     directory = account_directory(account_id)
     environment = os.environ.copy()
     for name in AUTH_ENV[provider]:
@@ -82,19 +118,20 @@ def collector_environment(account_id: str, provider: str) -> dict[str, str]:
         path.mkdir(mode=0o700, exist_ok=True)
     environment.update(HOME=str(scan_home), XDG_DATA_HOME=str(scan_data), XDG_CACHE_HOME=str(scan_cache))
     if provider == "claude":
-        environment["CLAUDE_CONFIG_DIR"] = str(directory / "claude")
+        environment["CLAUDE_CONFIG_DIR"] = str(native or directory / "claude")
         original_home = Path.home()
         saved = original_home / ".local/bin/agent-usage-plus-base-claude"
         environment["AGENT_USAGE_PLUS_CLAUDE_BASE_COLLECTOR"] = str(saved if saved.is_file() else Path("/usr/share/omarchy/bin/omarchy-agent-usage-claude"))
     else:
-        codex_home = directory / "codex"
-        if codex_home.is_symlink():
+        codex_home = native or directory / "codex"
+        if not native and codex_home.is_symlink():
             raise ValueError("Codex directory cannot be a symlink")
-        codex_home.mkdir(mode=0o700, exist_ok=True)
+        if not native:
+            codex_home.mkdir(mode=0o700, exist_ok=True)
         config = codex_home / "config.toml"
-        if config.is_symlink():
+        if not native and config.is_symlink():
             raise ValueError("Codex config cannot be a symlink")
-        if not config.exists():
+        if not native and not config.exists():
             config.write_text('cli_auth_credentials_store = "file"\n', encoding="utf-8")
             config.chmod(0o600)
         environment["CODEX_HOME"] = str(codex_home)
@@ -106,7 +143,7 @@ def collector_environment(account_id: str, provider: str) -> dict[str, str]:
 
 def collect(account_id: str, profile: dict[str, str], flags: list[str]) -> dict:
     provider = profile["provider"]
-    environment = collector_environment(account_id, provider)
+    environment = collector_environment(account_id, provider, profile.get("path", ""))
     collector = ROOT / "bin" / f"omarchy-agent-usage-{provider}-cost"
     with tempfile.TemporaryFile(mode="w+b") as output:
         subprocess.run([str(collector), *flags], env=environment, stdout=output,
@@ -156,12 +193,26 @@ def remove_unconfigured_records(profiles: dict[str, dict[str, str]]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--profiles-json", required=True)
+    parser.add_argument("--profiles-json", default="{}")
+    parser.add_argument("--discover-json")
+    parser.add_argument("--provider", choices=("claude", "codex"), default="codex")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--limits-only", action="store_true")
     parser.add_argument("--except", dest="excluded", action="append", default=[])
     parser.add_argument("accounts", nargs="*")
     args = parser.parse_intermixed_args(argv)
+    if args.discover_json is not None:
+        try:
+            if len(args.discover_json.encode("utf-8")) > MAX_CONFIG_BYTES:
+                raise ValueError("Account paths are too large")
+            paths = json.loads(args.discover_json)
+            if not isinstance(paths, list) or not paths:
+                raise ValueError("Enter one or more account paths")
+            print(json.dumps({"profiles": discover_paths(paths, args.provider)}))
+            return 0
+        except (OSError, ValueError):
+            print(json.dumps({"error": "No accounts imported. Check the paths: use existing CLI directories or their parent directory."}))
+            return 2
     try:
         profiles = profiles_from_json(args.profiles_json)
     except (ValueError, json.JSONDecodeError) as exc:
