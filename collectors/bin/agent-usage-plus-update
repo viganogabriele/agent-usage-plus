@@ -13,9 +13,12 @@ if [[ -z $base_updater ]]; then
   if [[ -x $local_updater ]]; then
     base_updater=$local_updater
   else
-    base_updater=/usr/share/omarchy/bin/omarchy-agent-usage-update
+    base_updater="$script_dir/omarchy-agent-usage-update"
   fi
 fi
+# Use the same live compatibility reader for the default Codex account and
+# imported accounts, even when the optional companion package is not installed.
+export AGENT_USAGE_PLUS_CODEX_COLLECTOR=${AGENT_USAGE_PLUS_CODEX_COLLECTOR:-"$script_dir/omarchy-agent-usage-codex-cost"}
 
 flags=()
 only=()

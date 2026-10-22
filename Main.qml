@@ -27,6 +27,50 @@ Item {
   readonly property var accountProfiles: Accounts.normalizeProfiles(setting("accountProfiles", {}))
   readonly property var selectedAccounts: setting("selectedAccounts", {})
   onAccountProfilesChanged: if (refreshStarted) runUpdate("normal")
+  property string accountImportStatus: ""
+  readonly property bool accountImportRunning: accountImportProcess.running
+
+  function importAccounts(provider, pathsText) {
+    if (accountImportProcess.running) return
+    var paths = String(pathsText).split(/\r?\n/).map(function(p) { return p.trim() }).filter(function(p) { return p !== "" })
+    if (!paths.length) return
+    accountImportStatus = "Looking for accounts…"
+    var scriptPath = decodeURIComponent(String(Qt.resolvedUrl("collectors/bin/agent-usage-plus-accounts")).replace(/^file:\/\//, ""))
+    accountImportProcess.command = [scriptPath, "--discover-json", JSON.stringify(paths), "--provider", provider]
+    accountImportProcess.running = true
+  }
+
+  Process {
+    id: accountImportProcess
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var result = JSON.parse(text)
+          if (result.error) { root.accountImportStatus = result.error; return }
+          var profiles = Object.assign({}, root.accountProfiles)
+          var count = 0
+          for (var i = 0; i < result.profiles.length; i++) {
+            var profile = result.profiles[i]
+            var exists = Object.keys(profiles).some(function(id) {
+              return profiles[id].provider === profile.provider && profiles[id].path === profile.path
+            })
+            if (exists) continue
+            var id = Accounts.nextProfileId(profile.provider, profile.name, profiles)
+            if (!id) id = Accounts.nextProfileId(profile.provider, "account", profiles)
+            profiles[id] = profile
+            count++
+          }
+          if (count) root.writeSetting("accountProfiles", JSON.stringify(profiles))
+          root.accountImportStatus = count ? "Imported " + count + " account(s). Refreshing usage…" : "These accounts are already configured."
+        } catch (e) { root.accountImportStatus = "Account discovery failed. Check the paths and try again." }
+      }
+    }
+    onExited: function(exitCode) {
+      if (exitCode !== 0 && root.accountImportStatus === "Looking for accounts…")
+        root.accountImportStatus = "Account discovery failed. Check the paths and try again."
+    }
+  }
 
   function activeAccountId(provider) {
     var selected = selectedAccounts && selectedAccounts[provider]
