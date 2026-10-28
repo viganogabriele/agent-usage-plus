@@ -25,6 +25,10 @@ unchanged.
 license, recolored into this project's white/`#111111` dark/light scheme.
 The paths and viewBox are unchanged.
 
+`agy.svg`/`agy-light.svg` use Google Antigravity's arch logo from Antigravity IDE,
+recolored into this project's dark/light variant convention (`#ffffff` on dark surfaces,
+`#111111` on light).
+
 `grok.svg`/`grok-light.svg` use xAI's Grok product mark from
 [lobe-icons](https://github.com/lobehub/lobe-icons) under its MIT license,
 recolored into this project's existing white/`#111111` dark/light scheme.

@@ -17,35 +17,40 @@ if [[ -z $base_updater ]]; then
 fi
 
 flags=()
-only=()
-devin_excluded=false
+declare -A requested=()
+declare -A excluded=()
 args=("$@")
 for ((index = 0; index < ${#args[@]}; index++)); do
   case ${args[$index]} in
     --force | --limits-only) flags+=("${args[$index]}") ;;
     --except)
       ((index += 1))
-      [[ ${args[$index]:-} == devin ]] && devin_excluded=true
+      if [[ -n ${args[$index]:-} ]]; then
+        excluded["${args[$index]}"]=1
+      fi
       ;;
-    *) only+=("${args[$index]}") ;;
+    *) requested["${args[$index]}"]=1 ;;
   esac
 done
 
-devin_wanted=true
-if $devin_excluded; then
-  devin_wanted=false
-elif ((${#only[@]} > 0)); then
-  devin_wanted=false
-  for provider in "${only[@]}"; do
-    [[ $provider == devin ]] && devin_wanted=true
-  done
-fi
+wanted() {
+  local provider="$1"
+  [[ -v excluded["$provider"] ]] && return 1
+  (( ${#requested[@]} == 0 )) && return 0
+  [[ -v requested["$provider"] ]] && return 0
+  return 1
+}
+
+bundled_wanted=()
+for candidate in devin agy; do
+  wanted "$candidate" && bundled_wanted+=("$candidate")
+done
 
 status=0
-"$base_updater" "$@" --except devin &
+"$base_updater" "$@" --except devin --except agy &
 base_pid=$!
-if $devin_wanted; then
-  "$bundled_runner" update "${flags[@]}" devin &
+if ((${#bundled_wanted[@]} > 0)); then
+  "$bundled_runner" update "${flags[@]}" "${bundled_wanted[@]}" &
   bundled_pid=$!
 fi
 

@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 import sys
 sys.path.insert(0, str(ROOT))
 
+from agent_usage_collectors.agy import collect as collect_agy  # noqa: E402
 from agent_usage_collectors.deepseek import collect as collect_deepseek  # noqa: E402
 from agent_usage_collectors.cursor import collect as collect_cursor  # noqa: E402
 from agent_usage_collectors.devin import collect as collect_devin  # noqa: E402
@@ -32,6 +33,7 @@ COLLECTORS = {
     "devin": collect_devin,
     "kimi": collect_kimi,
     "opencode-go": collect_opencode_go,
+    "agy": collect_agy,
 }
 
 
