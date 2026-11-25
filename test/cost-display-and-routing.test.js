@@ -14,7 +14,7 @@ const costCalculator = path.join(__dirname, "..", "scripts", "calculate-api-cost
 function readCostCard() {
   const source = fs.readFileSync(panel, "utf8")
   const start = source.indexOf("id: costSection")
-  const end = source.indexOf("// ---------- Usage ----------", start)
+  const end = source.indexOf("// ---------- Settings:", start)
   assert.ok(start >= 0 && end > start, "cost card block should be present")
   return source.slice(start, end)
 }
@@ -30,7 +30,7 @@ function readDetailModelSection() {
 function readSelectedCostCard() {
   const source = fs.readFileSync(panel, "utf8")
   const start = source.indexOf("id: costValueCard")
-  const end = source.indexOf("// ---------- Usage ----------", start)
+  const end = source.indexOf("// ---------- Settings:", start)
   assert.ok(start >= 0 && end > start, "selected cost card block should be present")
   return source.slice(start, end)
 }

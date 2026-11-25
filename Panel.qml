@@ -121,11 +121,7 @@ Panel {
   property double nowMs: Date.now()
 
   readonly property var limits: limitWindows(provider)
-  readonly property var models: modelRows(provider)
-  readonly property var detailModels: expanded ? detailModelRows(provider) : []
-  // Only computed while expanded: collapsed behavior/output must stay
-  // exactly what it was before this property existed.
-  readonly property var allModels: expanded ? allModelRows(providers) : []
+  readonly property var detailModels: expanded ? modelUsageRows(provider) : []
   readonly property var headline: bindingWindow(provider)
   readonly property var balance: provider ? (provider.balance || null) : null
   // Optional, collector-reported "what this would cost at published API
@@ -141,41 +137,9 @@ Panel {
   readonly property var costDailyRows: costSummary ? costSummary.days : []
   readonly property var costProviderRows: expanded ? CostAnalytics.providerRows(providers) : []
 
-  // ---------------------------------------------------------- history chart
-  //
-  // Issue #13. Session-only, like `expanded`/`settingsOpen` above — the
-  // selector re-slices `provider.recentDays`, which is already sitting in
-  // memory from the last refresh, so flipping it never touches
-  // usage.runUpdate()/Main.qml's updateProcess. Defaults to "7d" rather
-  // than the manifest's 30-day `historyDays` default because a real
-  // collector today only ever fills ~7-31 days (see capRecentDays in
-  // logic/aggregate.js): defaulting to a range most collectors can satisfy
-  // means expanding the panel for the first time shows a chart, not an
-  // immediate "not available" message.
-  property string historyRangeId: "7d"
-  // Details use every day the collector has actually recorded (up to 30),
-  // instead of pretending 24h/30d/90d are interchangeable choices when
-  // the source only has a week. This removes a misleading selector and makes
-  // the chart's time span self-evident.
-  readonly property int detailHistoryDays: provider && provider.recentDays
-    ? Math.min(30, Math.max(1, provider.recentDays.length)) : 7
-  // Only computed while expanded, same reasoning as `allModels` above.
-  readonly property var historySeries: (expanded && provider)
-    ? History.buildHistorySeries(provider.recentDays || [], detailHistoryDays)
-    : null
-
-  function historyUnavailableText(series) {
-    if (!series) return ""
-    var n = Number(series.availableDays || 0)
-    return "History not available beyond " + n + " day" + (n === 1 ? "" : "s")
-      + " for this subscription."
-  }
-
-  function historyRangeLabel(rangeId) {
-    for (var i = 0; i < History.RANGE_OPTIONS.length; i++)
-      if (History.RANGE_OPTIONS[i].id === rangeId) return History.RANGE_OPTIONS[i].label
-    return rangeId
-  }
+  // The trend covers every day retained by the collector, including day 31.
+  readonly property var historySeries: expanded && provider && Array.isArray(provider.recentDays) && provider.recentDays.length
+    ? History.buildHistorySeries(provider.recentDays, provider.recentDays.length) : null
 
   function historySeriesTotal(series) {
     if (!series || !series.points) return 0
@@ -253,7 +217,7 @@ Panel {
   readonly property var headlinePace: overviewWindow ? paceFor(overviewWindow) : null
   readonly property string overviewSeverity: overviewWindow ? severityForPercent(overviewWindow.percent) : "ok"
   readonly property bool overviewShowsBalance: !!balance && balance.funded > 0
-    && (!overviewWindow || Thresholds.worstSeverity(overviewSeverity, balanceSeverity) !== overviewSeverity)
+    && (!overviewWindow || windowIsStale(overviewWindow) || Thresholds.worstSeverity(overviewSeverity, balanceSeverity) !== overviewSeverity)
 
   // One short phrase per window. A run-out that lands before the reset is
   // the only case that earns the warning color; "ahead of pace" alone is
@@ -269,15 +233,18 @@ Panel {
     return points + "% under pace"
   }
 
-  // A chip's ring: the account's fullest current window (the one its color
-  // already warns about), or for a prepaid-only account the credit left —
-  // the same quantity its overview gauge shows.
-  function chipRingValue(p) {
+  // Keep the ring's value and color tied to the same current allowance.
+  function chipMeter(p) {
     var w = currentBindingWindow(p)
-    if (w && w.percent >= 0) return displayPercent(w.percent)
+    var hasWindow = w && !windowIsStale(w)
     var credit = p ? p.balance : null
-    if (credit && Number(credit.funded) > 0) return clamp(Number(credit.remaining) / Number(credit.funded), 0, 1)
-    return -1
+    if (credit && credit.funded > 0) {
+      var remaining = clamp(credit.remaining / credit.funded, 0, 1)
+      var creditSeverity = severityForPercent(1 - remaining)
+      if (!hasWindow || Thresholds.worstSeverity(severityForPercent(w.percent), creditSeverity) !== severityForPercent(w.percent))
+        return { value: remaining, severity: creditSeverity }
+    }
+    return hasWindow ? { value: displayPercent(w.percent), severity: severityForPercent(w.percent) } : null
   }
 
   function withoutRunOut(pace) {
@@ -339,6 +306,7 @@ Panel {
     var ms = p ? Date.parse(String(p.updatedAt || "")) : NaN
     if (!isFinite(ms)) return ""
     var age = root.nowMs - ms
+    if (age < -60000) return ""
     if (age < 60000) return "Updated just now"
     return "Updated " + root.formatDuration(age) + " ago"
   }
@@ -495,7 +463,6 @@ Panel {
   readonly property string severity: (headlineSeverity === "critical" || balanceSeverity === "critical")
     ? "critical" : ((headlineSeverity === "warn" || balanceSeverity === "warn") ? "warn" : "ok")
   readonly property bool alarming: severity === "critical"
-  readonly property bool balanceAlarming: balanceSeverity === "critical"
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
   function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
@@ -540,7 +507,7 @@ Panel {
   // selected logo vertically instead of maintaining a second horizontal
   // scroll surface inside the panel.
   function ensureSelectedChipVisible() {
-    if (!root.opened || !providerChipRepeater || !providerSwitch || !panelFlick || !column)
+    if (!root.opened || root.settingsOpen || !providerChipRepeater || !providerSwitch || !panelFlick || !column)
       return
     var chip = providerChipRepeater.itemAt(providerIndex)
     if (!chip || chip.width <= 0 || chip.height <= 0 || panelFlick.height <= 0) return
@@ -630,6 +597,7 @@ Panel {
   // as a one-minute window.
   function limitWindow(label, percent, resetAt, title, startedAt, tokenLimit) {
     return {
+      label: String(label || ""),
       title: String(title || "") !== "" ? String(title) : windowTitle(label),
       // Pace only trusts a window length the collector stated; a title read
       // back out of a free-text label is not one (see logic/insights.js).
@@ -778,48 +746,10 @@ Panel {
     return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][parsed.getDay()]
   }
 
-  function dayLabel(date, today) {
-    if (today) return "Today"
-    return dayName(date)
-  }
-
   function shortHistoryDate(date) {
     var parsed = new Date(String(date || "") + "T00:00:00")
     if (isNaN(parsed.getTime())) return String(date || "")
     return (parsed.getMonth() + 1) + "/" + parsed.getDate()
-  }
-
-  // The switch deliberately gives every provider the same hit target. A
-  // plain Text inside qs.Ui.Button does not elide by itself, so cap its
-  // visible label here instead of letting a long collector-supplied name
-  // bleed into the next chip. The full name remains the hero title when the
-  // chip is selected.
-  function providerChipLabel(provider) {
-    var name = String(provider && provider.providerName || "")
-    return name.length > 14 ? name.slice(0, 13) + "…" : name
-  }
-
-  // A full collector can retain up to 90 days. Rendering every one as a
-  // collapsed row made a normal panel hundreds of pixels taller than the
-  // screen, even before a person opened the detailed chart. Keep the useful
-  // recent week in the summary; the explicit details control exposes every
-  // available day and range without silently discarding data.
-  function summaryDays(p, limit) {
-    var list = p && Array.isArray(p.recentDays) ? p.recentDays.slice() : []
-    list.sort(function(a, b) {
-      var left = String(a && a.date || "")
-      var right = String(b && b.date || "")
-      return left < right ? -1 : (left > right ? 1 : 0)
-    })
-    var count = Math.max(1, Number(limit) || 7)
-    return list.length > count ? list.slice(list.length - count) : list
-  }
-
-  function dayPeak(days) {
-    var list = Array.isArray(days) ? days : []
-    var peak = 0
-    for (var i = 0; i < list.length; i++) peak = Math.max(peak, Number(list[i].messageCount || 0))
-    return peak
   }
 
   function unpricedModelText(cost) {
@@ -926,19 +856,8 @@ Panel {
     return text
   }
 
-  function weekPeak(p) {
-    var days = p ? (p.recentDays || []) : []
-    var peak = 0
-    for (var i = 0; i < days.length; i++) peak = Math.max(peak, Number(days[i].messageCount || 0))
-    return peak
-  }
-
-  // Shared by the per-provider "TOKENS BY MODEL" section and the expanded
-  // view's cross-provider one below — both start from a modelId -> token
-  // bucket map, they just build it differently (one provider's modelUsage
-  // vs. Aggregate.allProviderModelUsage's combined map across every
-  // enabled provider).
-  function modelUsageRows(usageByModel, limit) {
+  function modelUsageRows(p) {
+    var usageByModel = p ? p.modelUsage || {} : {}
     var rows = []
     for (var id in usageByModel) {
       var bucket = usageByModel[id] || {}
@@ -957,26 +876,7 @@ Panel {
       })
     }
     rows.sort(function(a, b) { return b.total - a.total })
-    return rows.slice(0, limit || 4)
-  }
-
-  function modelRows(p) {
-    // The default view is an at-a-glance dashboard. Three ranked rows keep
-    // the most useful comparison visible without pushing the current limit
-    // and cost information below the fold; the detailed view retains the
-    // complete cross-provider table.
-    return modelUsageRows(p ? (p.modelUsage || {}) : {}, 3)
-  }
-
-  function detailModelRows(p) {
-    return modelUsageRows(p ? (p.modelUsage || {}) : {}, 12)
-  }
-
-  // Every enabled provider's models in one table, not just the currently
-  // selected chip's — only computed/rendered when the panel is expanded.
-  // A generous cap (12) since it spans every subscription at once.
-  function allModelRows(providerList) {
-    return modelUsageRows(Aggregate.allProviderModelUsage(providerList), 12)
+    return rows.slice(0, 12)
   }
 
   function modelTooltip(row) {
@@ -993,13 +893,6 @@ Panel {
     if (provider && provider.syncEnabled && provider.syncDeviceCount > 0)
       return "Merged from " + provider.syncDeviceCount + " device" + (provider.syncDeviceCount === 1 ? "" : "s")
     return ""
-  }
-
-  // Agents that ship a white mark carry an `assets/<id>-light.svg` twin for
-  // light surfaces; marks that work on both (Claude's brand-orange) ship one
-  // file. The luminance check decides which candidate to try first.
-  function colorLuminance(color) {
-    return Contrast.luminance(color)
   }
 
   // An asset path has to be explicitly registered. QML's Image cannot probe a
@@ -1302,7 +1195,8 @@ Panel {
     for (var i = 0; i < windows.length; i++) {
       var w = windows[i]
       if (w.percent < 0) continue
-      var line = String(w.title || w.label || "Limit") + " " + Format.formatPercent(w.percent)
+      var line = String(w.title || w.label || "Limit") + " " + Format.formatPercent(w.percent, usage.showAvailablePercentage)
+        + (usage.showAvailablePercentage ? " available" : " used")
       if (w.resetAt) {
         var remainingMs = Date.parse(w.resetAt) - Date.now()
         if (isFinite(remainingMs) && remainingMs > 0)
@@ -2131,7 +2025,9 @@ Panel {
             text: !usage.initialDiscoveryComplete
               ? "Scanning AI coding subscriptions…"
               : (root.settingsProviders.length > 0
-                ? "Every provider is turned off.\nOpen Settings (gear, or s) to turn one back on."
+                ? (root.settingsProviders.some(function(row) { return row.enabled })
+                  ? "Waiting for usage data. Refresh to check again."
+                  : "Every provider is turned off.\nOpen Settings (gear, or s) to turn one back on.")
                 : "No AI coding subscriptions found.\nAgents show up here once you've used them.")
             color: root.dim
             font.family: root.fontFamily
@@ -2148,7 +2044,7 @@ Panel {
           // reliable while a Repeater model is being rebuilt during refresh.
           Grid {
             id: providerSwitch
-            visible: root.providers.length > 1
+            visible: !root.settingsOpen && root.providers.length > 1
             width: parent.width
             spacing: Style.space(6)
             readonly property real chipSize: Math.max(
@@ -2259,8 +2155,8 @@ Panel {
                   }
                   onTranslationChanged: {
                     if (!active) return
-                    providerSwitch.updateDragTarget(translation.x, translation.y)
-                    dragGhost.follow(translation.x, translation.y)
+                    providerSwitch.updateDragTarget(activeTranslation.x, activeTranslation.y)
+                    dragGhost.follow(activeTranslation.x, activeTranslation.y)
                   }
                 }
 
@@ -2270,9 +2166,10 @@ Panel {
                   anchors.centerIn: parent
                   width: parent.width - Style.space(4)
                   height: width
-                  visible: value >= 0
-                  value: root.chipRingValue(providerChip.modelData)
-                  color: root.colorForSeverity(root.providerWorstSeverity(providerChip.modelData))
+                  readonly property var meter: root.chipMeter(providerChip.modelData)
+                  visible: !!meter
+                  value: meter ? meter.value : 0
+                  color: root.colorForSeverity(meter ? meter.severity : "ok")
                 }
 
                 ProviderMark {
@@ -2320,12 +2217,11 @@ Panel {
           // Floating copy of whichever mark is being dragged, parented at the
           // panel's top level (not inside providerSwitch's Grid) so it can
           // render above every sibling section regardless of where the
-          // switcher sits, positioned by mapping the stationary source
-          // chip's coordinates into root's space rather than by being moved
-          // as a grid child itself.
+          // switcher sits. Keep the ghost in the popup window; the widget
+          // root belongs to the separate, bar-height window.
           Item {
             id: dragGhost
-            parent: root
+            parent: keyCatcher
             z: 1000
             visible: false
             width: 0
@@ -2344,7 +2240,7 @@ Panel {
             function follow(offsetX, offsetY) {
               var source = providerChipRepeater.itemAt(providerSwitch.dragFromIndex)
               if (!source) return
-              var origin = source.mapToItem(root, 0, 0)
+              var origin = source.mapToItem(keyCatcher, 0, 0)
               x = origin.x + offsetX
               y = origin.y + offsetY
             }
@@ -2417,7 +2313,9 @@ Panel {
             readonly property real gaugeValue: hasWindow
               ? root.displayPercent(root.overviewWindow.percent)
               : (root.balance && root.balance.funded > 0 ? root.clamp(root.balance.remaining / root.balance.funded, 0, 1) : 0)
-            readonly property string gaugeSeverity: hasWindow ? root.overviewSeverity : root.balanceSeverity
+            readonly property string gaugeSeverity: hasWindow
+              ? (root.windowIsStale(root.overviewWindow) ? "ok" : root.overviewSeverity)
+              : root.balanceSeverity
 
             Rectangle {
               anchors.fill: parent
@@ -2446,6 +2344,7 @@ Panel {
 
                 RingGauge {
                   anchors.fill: parent
+                  opacity: overviewCard.hasWindow && root.windowIsStale(root.overviewWindow) ? 0.6 : 1
                   value: overviewCard.gaugeValue
                   marker: overviewCard.hasWindow && root.headlinePace ? root.displayPercent(root.headlinePace.elapsed) : -1
                   color: root.colorForSeverity(overviewCard.gaugeSeverity)
@@ -2551,7 +2450,8 @@ Panel {
           // ---------- Today at a glance ----------
           Row {
             id: todayTiles
-            visible: !root.settingsOpen && root.hasActivity
+            visible: !root.settingsOpen && !!root.provider && root.provider.hasLocalStats !== false
+              && (root.hasActivity || todayTokens > 0 || root.provider.todayPrompts > 0 || root.provider.todaySessions > 0)
             width: parent.width
             spacing: Style.space(8)
             readonly property real tileWidth: (width - spacing * 2) / 3
@@ -2591,7 +2491,7 @@ Panel {
               width: todayTiles.tileWidth
               glyph: "󰈸"
               label: "Streak"
-              valueText: root.activity
+              valueText: root.hasActivity
                 ? root.activity.streak + (root.activity.streak === 1 ? " day" : " days") : "—"
               hint: root.activity && root.activity.best
                 ? "Best " + usage.formatTokenCount(root.activity.best.value) + " · " + root.shortHistoryDate(root.activity.best.date)
@@ -2747,7 +2647,8 @@ Panel {
 
                   Button {
                     width: parent.width - useAccountButton.width - parent.spacing
-                    text: accountRow.modelData.providerName + " · " + root.providerPercentText(accountRow.modelData)
+                    text: accountRow.modelData.providerName + " · "
+                      + (accountRow.modelData.usageStatusText || root.providerPercentText(accountRow.modelData))
                     tooltipText: "Show limits for " + accountRow.modelData.providerName
                     selected: root.provider && root.provider.providerId === accountRow.modelData.providerId
                     bordered: true
@@ -2937,7 +2838,7 @@ Panel {
                   width: parent.tileWidth
                   label: "Recorded"
                   valueText: root.activity ? usage.formatTokenCount(root.activity.total) : "—"
-                  hint: "tokens in view"
+                  hint: "tokens recorded"
                 }
 
                 StatTile {
@@ -2954,7 +2855,7 @@ Panel {
                   valueText: root.activity && root.activity.weekChange !== null
                     ? Insights.formatChange(root.activity.weekChange) : "—"
                   hint: root.activity && root.activity.weekChange !== null
-                    ? (root.activity.weekChange >= 0 ? "busier week" : "quieter week") : "needs 14 days"
+                    ? (root.activity.weekChange === 0 ? "same usage" : (root.activity.weekChange > 0 ? "busier week" : "quieter week")) : "needs 14 days"
                 }
               }
             }
@@ -3121,17 +3022,6 @@ Panel {
             }
 
             Text {
-              visible: !root.provider
-              width: parent.width
-              text: "Select a subscription above to see its history."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              horizontalAlignment: Text.AlignHCenter
-              wrapMode: Text.WordWrap
-            }
-
-            Text {
               visible: !!(root.historySeries && root.historySeries.ok && root.historySeries.peak <= 0)
               width: parent.width
               topPadding: Style.space(6)
@@ -3234,16 +3124,14 @@ Panel {
                     ys.push(pointY(points[i] || {}))
                   }
 
-                  // A gently smoothed line (midpoint quadratic curves never
-                  // overshoot below zero) over a fading area fill.
+                  // Interpolate through each day's measured value. Horizontal
+                  // tangents keep the curve inside the adjacent samples.
                   function tracePath() {
                     ctx.moveTo(xs[0], ys[0])
                     for (var k = 1; k < n; k++) {
                       var mx = (xs[k - 1] + xs[k]) / 2
-                      var my = (ys[k - 1] + ys[k]) / 2
-                      ctx.quadraticCurveTo(xs[k - 1], ys[k - 1], mx, my)
+                      ctx.bezierCurveTo(mx, ys[k - 1], mx, ys[k], xs[k], ys[k])
                     }
-                    ctx.lineTo(xs[n - 1], ys[n - 1])
                   }
 
                   var area = ctx.createLinearGradient(0, top, 0, bottom)
@@ -3362,17 +3250,6 @@ Panel {
               }
             }
 
-            Text {
-              visible: !!(root.historySeries && !root.historySeries.ok)
-              width: parent.width
-              text: root.historyUnavailableText(root.historySeries)
-              textFormat: Text.PlainText
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              horizontalAlignment: Text.AlignHCenter
-              wrapMode: Text.WordWrap
-            }
           }
           }
 
@@ -3996,141 +3873,6 @@ Panel {
                   font.pixelSize: Style.font.caption
                 }
               }
-            }
-          }
-
-          // ---------- Usage ----------
-          PanelSeparator {
-            visible: usageSection.visible
-            foreground: root.foreground
-          }
-
-          Column {
-            id: usageSection
-            // Replaced by the full labelled history chart in Details. A
-            // three-day mini-chart followed by a second chart was redundant
-            // and made both the data and the scrolling worse.
-            visible: false
-            width: parent.width
-            spacing: Style.spacing.md
-
-            readonly property int maxSummaryDays: 3
-            readonly property int availableDayCount: root.provider && root.provider.recentDays
-              ? root.provider.recentDays.length : 0
-            readonly property var days: root.summaryDays(root.provider, maxSummaryDays)
-            readonly property real peak: Math.max(1, root.dayPeak(days))
-
-            PanelSectionHeader {
-              width: parent.width
-              text: "Recent activity"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: usageSection.days
-
-              DayRow {
-                required property var modelData
-                required property int index
-
-                width: usageSection.width
-                day: modelData
-                ratio: Number(modelData.messageCount || 0) / usageSection.peak
-                // By date, not by position: the Claude stats-cache fallback can
-                // hand us a window that stops short of today.
-                today: String(modelData.date || "") === root.todayDate()
-              }
-            }
-
-            Text {
-              visible: usageSection.availableDayCount > usageSection.days.length
-              width: parent.width
-              text: usageSection.days.length + " of " + usageSection.availableDayCount
-                + " days shown · Details has the full history"
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
-          }
-
-          // ---------- Models ----------
-          PanelSeparator {
-            visible: modelSection.visible
-            foreground: root.foreground
-          }
-
-          Column {
-            id: modelSection
-            // Keep Details focused on the time-series users can act on.
-            // Model totals remain available in the collector records and
-            // should return only with a purpose-built comparison view.
-            visible: false
-            width: parent.width
-            spacing: Style.spacing.md
-
-            PanelSectionHeader {
-              width: parent.width
-              text: "Most-used models"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: root.models
-
-              ModelRow {
-                required property var modelData
-                width: modelSection.width
-                row: modelData
-                // Scaled to the heaviest model, so the top row is always full —
-                // the same scale-to-peak the weekly chart uses for its busiest day.
-                share: modelData.total / Math.max(1, root.models[0].total)
-              }
-            }
-          }
-
-          // ---------- Expanded: combined view across every enabled
-          // provider, not just the currently selected chip.
-          PanelSeparator {
-            visible: false
-            foreground: root.foreground
-          }
-
-          Column {
-            id: expandedSection
-            visible: false
-            width: parent.width
-            spacing: Style.spacing.md
-
-            PanelSectionHeader {
-              width: parent.width
-              text: "TOKENS BY MODEL · ALL SUBSCRIPTIONS"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: root.allModels
-
-              ModelRow {
-                required property var modelData
-                width: expandedSection.width
-                row: modelData
-                share: modelData.total / Math.max(1, root.allModels[0].total)
-              }
-            }
-
-            Text {
-              visible: root.allModels.length === 0
-              width: parent.width
-              text: "No model usage yet across enabled subscriptions."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              horizontalAlignment: Text.AlignHCenter
-              wrapMode: Text.WordWrap
             }
           }
 
@@ -5567,12 +5309,11 @@ Panel {
     property color trackColor: root.track
     property color markerColor: root.foreground
     property real thickness: Style.space(9)
-    property real shownValue: 0
+    property real shownValue: root.clamp(value, 0, 1)
 
     Behavior on shownValue {
       NumberAnimation { duration: 650; easing.type: Easing.OutCubic }
     }
-    Component.onCompleted: shownValue = Qt.binding(function() { return root.clamp(ring.value, 0, 1) })
 
     // Repaint on a live theme switch: onPaint reads these root colors
     // directly, and Canvas does not track them on its own.
@@ -6000,80 +5741,6 @@ Panel {
 
   // One row per day: label, bar, tokens. Today is picked out in full
   // foreground so the week reads as a run-up to right now.
-  component DayRow: Item {
-    id: dayRow
-    property var day: null
-    property real ratio: 0
-    property bool today: false
-
-    implicitHeight: Math.max(dayLabel.implicitHeight, dayValue.implicitHeight) + Style.spacing.sm
-
-    Text {
-      id: dayLabel
-      text: root.dayLabel(dayRow.day ? dayRow.day.date : "", dayRow.today)
-      color: dayRow.today ? root.foreground : root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
-      font.bold: dayRow.today
-      anchors.left: parent.left
-      anchors.verticalCenter: parent.verticalCenter
-      width: Style.space(52)
-    }
-
-    Rectangle {
-      id: dayTrack
-      anchors.left: dayLabel.right
-      anchors.right: dayValue.left
-      anchors.leftMargin: Style.space(8)
-      anchors.rightMargin: Style.space(10)
-      anchors.verticalCenter: parent.verticalCenter
-      height: Math.max(Style.space(4), Math.round(Style.spacing.controlHeight * 0.14))
-      radius: height / 2
-      color: root.track
-
-      Rectangle {
-        anchors.left: parent.left
-        anchors.verticalCenter: parent.verticalCenter
-        height: parent.height
-        radius: parent.radius
-        width: parent.width * root.clamp(dayRow.ratio, 0, 1)
-        color: dayRow.today ? root.foreground : root.alpha(root.foreground, 0.55)
-
-        Behavior on width {
-          NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
-        }
-      }
-    }
-
-    Text {
-      id: dayValue
-      text: usage.formatTokenCount(dayRow.day ? Number(dayRow.day.messageCount || 0) : 0)
-      color: dayRow.today ? root.foreground : root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
-      font.bold: true
-      horizontalAlignment: Text.AlignRight
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      width: Style.space(52)
-    }
-
-    MouseArea {
-      id: dayHover
-      anchors.fill: parent
-      hoverEnabled: true
-      acceptedButtons: Qt.NoButton
-    }
-
-    PanelToolTip {
-      visible: dayHover.containsMouse
-      text: root.dayTooltip(dayRow.day, dayRow.today)
-      fontFamily: root.fontFamily
-    }
-  }
-
-  // Model rows read as a table: the share bar fills the row behind the label
-  // instead of stacking under it, which keeps the whole dashboard on one screen.
   component ModelRow: Item {
     id: modelRow
     property var row: null
