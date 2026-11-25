@@ -90,7 +90,9 @@ test("expanded cost details include provider, daily, and model analytics", () =>
   assert.match(source, /id: costProviderOverview/)
   assert.match(source, /id: costDailyChart/)
   assert.match(source, /id: costModelChart/)
-  assert.match(source, /model: root\.costProviderRows/)
+  // Providers with an estimate get a ranked row; the rest are named once.
+  assert.match(source, /costProviderOverview\.priced/)
+  assert.match(source, /"No estimate: "/)
   assert.match(source, /id: costValueCard/)
 })
 
@@ -102,7 +104,9 @@ test("selected cost details use the spacious card rhythm", () => {
   assert.match(source, /anchors\.rightMargin: Style\.space\(18\)/)
   assert.match(source, /id: costMetrics[\s\S]*?spacing: Style\.space\(10\)/)
   assert.match(source, /font\.pixelSize: Style\.font\.display/)
-  assert.match(source, /id: costModelRow[\s\S]*?height: Style\.space\(44\)/)
+  // Models are one stacked bar plus a compact legend line each.
+  assert.match(source, /id: costModelStack/)
+  assert.match(source, /id: costModelRow[\s\S]*?height: Style\.space\(22\)/)
   assert.doesNotMatch(source, /costApiHint\(/)
 })
 

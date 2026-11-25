@@ -29,6 +29,7 @@ test("every detail card belongs to exactly one view", () => {
     "id: balanceSection": "usage",
     "id: limitsSection": "usage",
     "id: accountsCard": "usage",
+    "id: resetsCard": "usage",
     "id: activityCard": "activity",
     "id: historyCard": "activity",
     "id: tokenMixCard": "models",
@@ -44,11 +45,21 @@ test("every detail card belongs to exactly one view", () => {
   }
 })
 
-test("the overview leads with each window's reset", () => {
-  const ring = block("component RingTile: Item {", "component TabStrip")
+test("the overview leads with each window's reset and its forecast", () => {
+  const ring = block("component RingTile: Item {", "component ForecastLane")
   assert.match(ring, /root\.formatDuration\(ringTile\.resetMs\)/)
-  assert.match(ring, /"resets " \+ root\.resetClock\(ringTile\.window\)/)
-  assert.match(source, /function resetClock\(w\)/)
+  assert.match(ring, /ringTile\.resetParts\.day \+ " " \+ ringTile\.resetParts\.clock/)
+  const lane = block("component ForecastLane: Item {", "component TabStrip")
+  assert.match(lane, /"Empties "/)
+  assert.match(lane, /before reset/)
+  // Rings are fixed instances, not Repeater delegates rebuilt on refresh.
+  const overview = block("id: overviewCard", "// ---------- Upcoming resets")
+  assert.doesNotMatch(overview, /model: overviewCard\.ringCount === 2 \? root\.ringWindows/)
+})
+
+test("the usage view lists upcoming resets across subscriptions", () => {
+  assert.match(source, /readonly property var upcomingResets:/)
+  assert.match(source, /id: resetsCard[\s\S]*?root\.viewTab === "usage"/)
 })
 
 test("the all-providers list never truncates its labels into fixed columns", () => {

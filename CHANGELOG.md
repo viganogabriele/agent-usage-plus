@@ -7,12 +7,15 @@ All notable changes to this project are documented in this file. The format is b
 ### Added
 
 - Redesigned panel dashboard (the bar is unchanged, pixel for pixel):
-  - An overview with Session and Weekly side by side as rings (or the two
-    fullest windows, or prepaid credit), each with its reset as a countdown
-    and a wall-clock time, a dot for how much of the window has elapsed, and
-    its pace; underneath, a verdict naming the window it is about — *Plenty
-    of room*, *On pace*, *Running hot*, *Almost out*, *Limit reached* — with
-    the run-out or the next reset.
+  - An overview with Session and Weekly side by side as rings in their own
+    accent-derived tints (or the two fullest windows, or prepaid credit),
+    each with its reset as a pill — countdown and wall-clock time — and a
+    dot for how much of the window has elapsed. Under them, a forecast lane
+    per window drawn as time from start to reset: where now is, when it
+    empties at this rate, and how long before the reset that leaves you
+    blocked ("Empties tomorrow 00:36 · 39m before reset").
+  - Upcoming resets across every subscription, soonest first, with what each
+    hands back ("frees 64%", "unlocks").
   - Four views under the overview — Usage, Activity, Models, Cost — instead
     of one long Details scroll; `e` steps through them, and a view with
     nothing to show says why.
@@ -25,13 +28,14 @@ All notable changes to this project are documented in this file. The format is b
   - Provider chips ringed with each account's fullest meter, plus a status dot
     for sign-in/endpoint problems, so the switcher doubles as an overview.
   - A hero with a plan pill, "Updated … ago", and a one-click refresh button.
-  - Activity: a five-week calendar heatmap with recorded total, 7-day
-    average and week-over-week change, and a smoothed, area-filled token
-    trend with a hover guide and tooltips. Models: a token-mix bar with cache
-    hit share and per-model use. Cost: the selected account's API-rate
-    estimate with average per day and a 30-day pace, then every provider in
-    two-line rows (mark, plan usage or credit, estimate and period) with a
-    total — nothing cut to "Partial · A…".
+  - Activity: a smoothed, area-filled token trend with a hover guide, then a
+    five-week calendar heatmap with recorded total, 7-day average and
+    week-over-week change. Models: a token-mix bar with cache hit share and
+    per-model use. Cost: the selected account's API-rate estimate with "a
+    day" / "per 30 days" chips, a gradient daily chart and models as one
+    stacked, colored bar; then ranked rows for the providers that have an
+    estimate, each with its share of the total, and one line naming the
+    rest — nothing cut to "Partial · A…".
   - Accounts of the selected provider as rows with a ring, reading, next
     reset and Use/Active.
 - Redesigned Settings at the panel's own width (it used to jump to twice
@@ -46,6 +50,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- Panel cards and controls keep a soft minimum corner radius (12px cards,
+  8px controls, pill switches) even when Hyprland's window rounding is 0,
+  instead of turning into hard boxes; the bar is untouched.
+
 - Panel text is contrast-checked against the popup surface: secondary text
   no longer drops below 4.5:1 on dark themes (Everforest, Gruvbox, Tokyo
   Night, Nord) or reads darker than primary text on light ones, and amber,
@@ -55,6 +63,12 @@ All notable changes to this project are documented in this file. The format is b
 - Token counts past a trillion read `1.2T` instead of `1234.0B`.
 
 ### Fixed
+
+- The panel no longer resizes or re-animates on its own: a hover-only hint
+  under the provider marks added and removed a line of text, and every
+  refresh rebuilt the rings and lists (re-filling rings from zero). Lists now
+  update in place, and the refresh icon spins only for a refresh you asked
+  for, not for the background run every opening starts.
 
 - Bar marks with a dark twin (Codex, Devin, OpenRouter, …) were drawn
   near-black on dark bars whose text color is a mid-tone light, such as

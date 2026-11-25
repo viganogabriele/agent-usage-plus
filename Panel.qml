@@ -35,6 +35,11 @@ Panel {
   // as its own distinct traffic-light color at a glance, not a paler shade
   // of critical that's easy to mistake for it against a dim theme.
   readonly property color warn: "#F2B705"
+  // The panel's own softness, independent of Hyprland's window rounding:
+  // with sharp windows (rounding 0) every card and control read as hard
+  // boxes. The shell's card frame itself still follows the theme.
+  readonly property real cardRadius: Math.max(Style.cornerRadius, Style.space(12))
+  readonly property real controlRadius: Math.max(Style.cornerRadius, Style.space(8))
   readonly property color surface: Commons.Color.popups.background
   // Secondary panel text. A fixed Qt.darker(foreground) fell below a 4.5:1
   // contrast on several dark themes (Everforest, Gruvbox, Tokyo Night, Nord)
@@ -357,21 +362,88 @@ Panel {
   // "today 18:40", "tomorrow 09:00", "Fri 09:00", or a date further out.
   function resetClock(w) {
     var ms = w ? Date.parse(String(w.resetAt || "")) : NaN
-    if (!isFinite(ms)) return ""
+    var parts = momentParts(ms)
+    return parts.day === "" ? "" : parts.day + " " + parts.clock
+  }
+
+  // A moment split into its day ("today", "tomorrow", "Fri", "Wed 2 Dec")
+  // and its clock time in the locale's own short format, minus seconds.
+  function momentParts(ms) {
+    if (!isFinite(ms)) return { day: "", clock: "" }
     var at = new Date(ms)
     var now = new Date(root.nowMs)
-    // Some locales' short format still carries seconds; a reset is a
-    // minute-precision fact.
     var format = String(Qt.locale().timeFormat(Locale.ShortFormat)).replace(/[:.]ss/, "").replace(/\s*t$/, "")
-    var time = Qt.formatTime(at, format)
+    var clock = Qt.formatTime(at, format)
     var startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
     var dayOffset = Math.floor((new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime() - startOfToday) / 86400000 + 0.5)
-    if (dayOffset <= 0) return "today " + time
-    if (dayOffset === 1) return "tomorrow " + time
-    if (dayOffset < 7) return Qt.locale().dayName(at.getDay(), Locale.ShortFormat) + " " + time
-    return Qt.locale().dayName(at.getDay(), Locale.ShortFormat) + " " + at.getDate() + " "
-      + Qt.locale().monthName(at.getMonth(), Locale.ShortFormat)
+    var day = dayOffset <= 0 ? "today" : (dayOffset === 1 ? "tomorrow"
+      : (dayOffset < 7 ? Qt.locale().dayName(at.getDay(), Locale.ShortFormat)
+        : Qt.locale().dayName(at.getDay(), Locale.ShortFormat) + " " + at.getDate() + " "
+          + Qt.locale().monthName(at.getMonth(), Locale.ShortFormat)))
+    return { day: day, clock: clock }
   }
+
+  // Each ring gets its own hue, both drawn from the theme accent, so
+  // Session and Weekly read apart at a glance; Warn and Critical still take
+  // over, and the opt-in traffic-light palette keeps its green.
+  function ringTint(w, index) {
+    var severity = w ? severityForPercent(w.percent) : "ok"
+    if (severity !== "ok" || usage.colorfulUsageMeters) return colorForSeverity(severity)
+    var accent = Commons.Color.accent
+    if (index === 0) return accent
+    var hue = accent.hslHue < 0 ? 0.6 : accent.hslHue
+    return Qt.hsla((hue + 0.33) % 1, Math.max(0.45, accent.hslSaturation), clamp(accent.hslLightness, 0.45, 0.72), 1)
+  }
+
+  // A categorical palette walked around the hue wheel from the theme
+  // accent: distinct per series, still recognisably the theme's.
+  function seriesColor(index) {
+    var accent = Commons.Color.accent
+    var hue = accent.hslHue < 0 ? 0.6 : accent.hslHue
+    if (index === 0) return accent
+    return Qt.hsla((hue + index * 0.17) % 1, Math.max(0.45, accent.hslSaturation),
+      clamp(accent.hslLightness, 0.48, 0.7), 1)
+  }
+
+  // Every enabled provider's current windows that hand room back, soonest
+  // first — the "can I switch to one that resets sooner?" list.
+  readonly property var upcomingResets: {
+    var rows = []
+    for (var i = 0; i < root.providers.length; i++) {
+      var p = root.providers[i]
+      var windows = limitWindows(p)
+      for (var j = 0; j < windows.length; j++) {
+        var inMs = resetMsFor(windows[j])
+        if (!(inMs > 0) || !(windows[j].percent > 0)) continue
+        var parts = momentParts(root.nowMs + inMs)
+        rows.push({
+          providerId: p.providerId,
+          providerName: p.providerName,
+          provider: p,
+          title: windows[j].title,
+          percent: windows[j].percent,
+          inMs: inMs,
+          day: parts.day,
+          clock: parts.clock
+        })
+      }
+    }
+    rows.sort(function(a, b) { return a.inMs - b.inMs })
+    return rows.slice(0, 5)
+  }
+
+  // Cards under the tabs fade in on a view change instead of popping.
+  property real viewFade: 1
+  NumberAnimation {
+    id: viewFadeIn
+    target: root
+    property: "viewFade"
+    from: 0.25
+    to: 1
+    duration: 220
+    easing.type: Easing.OutCubic
+  }
+  onViewTabChanged: viewFadeIn.restart()
 
   // "Updated 4m ago" from the collector's own timestamp; blank when the
   // record does not carry one, rather than implying it is live.
@@ -605,8 +677,18 @@ Panel {
     open()
   }
 
+  // Set by a refresh the person asked for (button, r, Enter) and cleared
+  // when that run ends. Background runs — the one every opening starts,
+  // the refresh timer — stay silent, so the panel never looks permanently
+  // busy while a slow collector works.
+  property bool manualRefresh: false
   function refreshNow() {
+    root.manualRefresh = true
     usage.refreshAll(true)
+  }
+  Connections {
+    target: usage
+    function onUpdatingChanged() { if (!usage.updating) root.manualRefresh = false }
   }
 
   // Right-click launches the agent of the mark that was clicked. Passing no
@@ -1426,72 +1508,66 @@ Panel {
     notifyProcess.running = true
   }
 
-  // Compact metric tiles give the three key numbers a deliberate visual
-  // hierarchy instead of making them read like a wrapped sentence.
-  component CostMetric: Item {
-    id: costMetric
-    property string label: ""
+  // A compact value chip: a bold figure with its unit beside it and a line
+  // of context underneath.
+  component CostChip: Rectangle {
+    id: costChip
     property string valueText: ""
+    property string label: ""
     property string hint: ""
 
-    implicitHeight: metricContent.implicitHeight + Style.space(16)
-
-    Rectangle {
-      anchors.fill: parent
-      radius: Style.cornerRadius
-      color: root.alpha(root.foreground, 0.055)
-      border.width: 1
-      border.color: root.alpha(root.foreground, 0.10)
-    }
+    implicitHeight: costChipColumn.implicitHeight + Style.space(16)
+    height: implicitHeight
+    radius: root.controlRadius
+    color: root.alpha(Commons.Color.accent, 0.08)
+    border.width: 1
+    border.color: root.alpha(Commons.Color.accent, 0.20)
 
     Column {
-      id: metricContent
-      anchors.fill: parent
-      anchors.margins: Style.space(8)
+      id: costChipColumn
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
       spacing: Style.space(2)
 
-      Text {
-        width: parent.width
-        text: costMetric.valueText
-        textFormat: Text.PlainText
-        color: root.foreground
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.subtitle
-        font.bold: true
-        horizontalAlignment: Text.AlignHCenter
-        elide: Text.ElideRight
+      Row {
+        spacing: Style.space(5)
+
+        Text {
+          anchors.baseline: costChipLabel.baseline
+          text: costChip.valueText
+          textFormat: Text.PlainText
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.subtitle
+          font.bold: true
+        }
+
+        Text {
+          id: costChipLabel
+          text: costChip.label
+          textFormat: Text.PlainText
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
       }
 
       Text {
+        visible: costChip.hint !== ""
         width: parent.width
-        text: costMetric.label
+        text: costChip.hint
         textFormat: Text.PlainText
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
-        horizontalAlignment: Text.AlignHCenter
-        elide: Text.ElideRight
-      }
-
-      Text {
-        // Always present, even when blank, so all three metric tiles in a
-        // row reserve the same height — Column drops invisible items from
-        // the layout, which used to make an empty-hint tile shorter than
-        // its neighbours.
-        width: parent.width
-        text: costMetric.hint
-        textFormat: Text.PlainText
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        horizontalAlignment: Text.AlignHCenter
         elide: Text.ElideRight
       }
     }
   }
 
-  // A wide track with faint ticks at the quarter marks, so the fill reads
-  // as "about two thirds of the way there" rather than an unscaled smear.
   component CheckpointMeter: Item {
     id: checkpointMeter
     property real value: -1
@@ -1908,7 +1984,7 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
               width: Style.space(46)
               height: width
-              radius: Style.cornerRadius + Style.space(4)
+              radius: root.cardRadius
               color: root.alpha(Commons.Color.accent, 0.10)
               border.width: 1
               border.color: root.alpha(Commons.Color.accent, 0.28)
@@ -2045,6 +2121,8 @@ Panel {
               spacing: Style.space(6)
 
               Button {
+
+                radius: root.controlRadius
                 id: refreshAction
                 visible: !root.settingsOpen
                 width: Style.space(28)
@@ -2053,10 +2131,10 @@ Panel {
                 verticalPadding: 0
                 iconText: "󰑐"
                 iconSize: Style.font.body
-                // Spins while a collector run is in flight (Button honors
-                // Omarchy's reduced-motion setting on its own).
-                iconSpinning: usage.updating
-                tooltipText: usage.updating ? "Refreshing…" : "Refresh now (r)"
+                // Spins only while a refresh you asked for runs (Button
+                // honors Omarchy's reduced-motion setting on its own).
+                iconSpinning: root.manualRefresh && usage.updating
+                tooltipText: root.manualRefresh && usage.updating ? "Refreshing…" : "Refresh now (r)"
                 bordered: true
                 focusable: true
                 foreground: root.foreground
@@ -2065,6 +2143,8 @@ Panel {
               }
 
               PanelActionButton {
+
+                radius: root.controlRadius
                 iconText: root.settingsOpen ? "󰁍" : "󰒓"
                 tooltipText: root.settingsOpen ? "Back to usage (s)" : "Settings (s)"
                 foreground: root.foreground
@@ -2104,8 +2184,6 @@ Panel {
           // reliable while a Repeater model is being rebuilt during refresh.
           Grid {
             id: providerSwitch
-
-            HoverHandler { id: providerSwitchHover }
             visible: !root.settingsOpen && root.providers.length > 1
             width: parent.width
             spacing: Style.space(6)
@@ -2151,16 +2229,23 @@ Panel {
 
             Repeater {
               id: providerChipRepeater
-              model: root.providers
+              // Indexed, so a refresh updates rows in place instead of
+              // rebuilding them (rebuilt rows re-animated and re-laid out).
+              model: (root.providers).length
 
               Button {
+
+                radius: root.controlRadius
                 id: providerChip
-                required property var modelData
+                readonly property var modelData: (root.providers)[index] || ({})
                 required property int index
 
                 width: providerSwitch.chipSize
                 height: providerSwitch.chipSize
-                tooltipText: String(modelData && (modelData.providerName || modelData.providerId) || "Provider") + " — drag to reorder"
+                // The reorder hint lives here, not as a line under the marks
+                // that appeared on hover and resized the whole panel.
+                tooltipText: String(modelData && (modelData.providerName || modelData.providerId) || "Provider")
+                  + "\n" + root.providers.length + " providers · drag marks to reorder"
                 selected: index === root.providerIndex
                 hasCursor: root.cursorActive && index === root.providerIndex
                 bordered: false
@@ -2183,7 +2268,7 @@ Panel {
                     && providerSwitch.dragToIndex === index
                     && providerSwitch.dragToIndex !== providerSwitch.dragFromIndex
                   color: "transparent"
-                  radius: Style.cornerRadius
+                  radius: root.controlRadius
                   border.width: 2
                   border.color: Commons.Color.accent
                 }
@@ -2266,18 +2351,6 @@ Panel {
             }
           }
 
-          // Shown only while the pointer is over the marks, where it is
-          // actionable; the rest of the time it was noise between the
-          // switcher and the overview.
-          Text {
-            visible: providerSwitch.visible && providerSwitchHover.hovered
-            width: parent.width
-            text: root.providers.length + " providers · drag marks to reorder"
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            horizontalAlignment: Text.AlignHCenter
-          }
 
           // Floating copy of whichever mark is being dragged, parented at the
           // panel's top level (not inside providerSwitch's Grid) so it can
@@ -2326,7 +2399,7 @@ Panel {
               implicitHeight: statusContent.implicitHeight + Style.spacing.xl * 2
               color: root.alpha(root.statusColor(root.provider), 0.10)
               borderSpec: Border.flat(root.alpha(root.statusColor(root.provider), 0.35), 1)
-              radius: Style.cornerRadius
+              radius: root.cardRadius
 
               Column {
                 id: statusContent
@@ -2361,11 +2434,10 @@ Panel {
               }
             }
 
-          // ---------- Overview: rings + verdict ----------
-          // The one-second answer, and the thing the bar cannot show: how
-          // full each window is, whether it is outrunning its own clock, and
-          // above all when it resets. Session and Weekly sit side by side;
-          // one sentence underneath says what to do about it.
+          // ---------- Overview: rings, resets, forecast ----------
+          // What the bar cannot show: how full each window is, when it
+          // resets (as large as the percentage it gives back), and whether
+          // it will run out before that reset at the current rate.
           BorderSurface {
             id: overviewCard
             visible: !root.settingsOpen && !!root.provider && !!root.verdict
@@ -2373,10 +2445,10 @@ Panel {
             implicitHeight: overviewContent.implicitHeight + Style.space(28)
             color: root.alpha(root.foreground, 0.035)
             borderSpec: Border.flat(root.alpha(Commons.Color.accent, 0.22), 1)
-            radius: Style.cornerRadius + Style.space(2)
+            radius: root.cardRadius
 
-            readonly property bool creditOnly: root.overviewShowsBalance && root.ringWindows.length === 0
-            readonly property int ringCount: creditOnly ? 1 : root.ringWindows.length
+            readonly property bool creditOnly: root.ringWindows.length === 0 && !!root.balance && root.balance.funded > 0
+            readonly property int ringCount: creditOnly ? 1 : Math.min(2, root.ringWindows.length)
 
             Rectangle {
               anchors.fill: parent
@@ -2384,8 +2456,8 @@ Panel {
               radius: parent.radius
               gradient: Gradient {
                 orientation: Gradient.Vertical
-                GradientStop { position: 0; color: root.alpha(Commons.Color.accent, 0.08) }
-                GradientStop { position: 0.7; color: root.alpha(Commons.Color.accent, 0.0) }
+                GradientStop { position: 0; color: root.alpha(Commons.Color.accent, 0.09) }
+                GradientStop { position: 0.75; color: root.alpha(Commons.Color.accent, 0.0) }
               }
             }
 
@@ -2398,122 +2470,65 @@ Panel {
               anchors.rightMargin: Style.space(14)
               spacing: Style.space(14)
 
-              // Two windows: a ring each, side by side.
+              // Fixed instances rather than a Repeater: a refresh rebinds
+              // them in place, so the rings never re-fill from zero.
               Row {
-                visible: overviewCard.ringCount === 2
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Style.space(10)
+                readonly property real tileWidth: overviewCard.ringCount === 2
+                  ? (overviewContent.width - spacing) / 2 : Math.min(overviewContent.width, Style.space(220))
+
+                RingTile {
+                  width: parent.tileWidth
+                  visible: overviewCard.ringCount >= 1
+                  creditMode: overviewCard.creditOnly
+                  window: !overviewCard.creditOnly && root.ringWindows.length > 0 ? root.ringWindows[0] : null
+                  tint: root.ringTint(window, 0)
+                }
+
+                RingTile {
+                  width: parent.tileWidth
+                  visible: overviewCard.ringCount === 2
+                  window: root.ringWindows.length > 1 ? root.ringWindows[1] : null
+                  tint: root.ringTint(window, 1)
+                }
+              }
+
+              // Forecast: one lane per ring, the window drawn as time from
+              // its start to its reset — where now is, where it runs out
+              // at this rate, and the stretch it would leave you blocked.
+              Column {
+                visible: !overviewCard.creditOnly && root.ringWindows.length > 0
                 width: parent.width
                 spacing: Style.space(10)
 
+                Rectangle {
+                  width: parent.width
+                  height: 1
+                  color: root.alpha(root.foreground, 0.08)
+                }
+
                 Repeater {
-                  model: overviewCard.ringCount === 2 ? root.ringWindows : []
+                  model: Math.min(2, root.ringWindows.length)
 
-                  RingTile {
-                    required property var modelData
-                    width: (overviewContent.width - Style.space(10)) / 2
-                    window: modelData
+                  ForecastLane {
+                    required property int index
+                    width: overviewContent.width
+                    window: root.ringWindows[index] || null
+                    tint: root.ringTint(window, index)
                   }
                 }
               }
 
-              // One window (or prepaid credit only): the ring with the
-              // verdict beside it instead of a lonely centered gauge.
-              Row {
-                visible: overviewCard.ringCount === 1
+              Text {
+                visible: overviewCard.creditOnly
                 width: parent.width
-                spacing: Style.space(14)
-
-                RingTile {
-                  id: soloRing
-                  width: Style.space(150)
-                  window: overviewCard.creditOnly ? null : (root.ringWindows.length > 0 ? root.ringWindows[0] : null)
-                  creditMode: overviewCard.creditOnly
-                }
-
-                Column {
-                  width: parent.width - soloRing.width - parent.spacing
-                  anchors.verticalCenter: parent.verticalCenter
-                  spacing: Style.space(6)
-
-                  Text {
-                    width: parent.width
-                    text: root.verdict ? root.verdict.title : ""
-                    textFormat: Text.PlainText
-                    color: root.verdict ? root.verdict.color : root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Math.round(Style.font.subtitle * 1.35)
-                    font.bold: true
-                    wrapMode: Text.WordWrap
-                  }
-
-                  Text {
-                    visible: text !== ""
-                    width: parent.width
-                    text: root.verdictDetail
-                    textFormat: Text.PlainText
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    wrapMode: Text.WordWrap
-                    lineHeight: 1.15
-                  }
-                }
-              }
-
-              // The verdict for two rings: a tinted strip naming the window
-              // it is about, so "Running hot" never floats unattributed.
-              Rectangle {
-                id: verdictStrip
-                visible: overviewCard.ringCount === 2
-                width: parent.width
-                height: verdictStripContent.implicitHeight + Style.space(16)
-                radius: Style.cornerRadius
-                color: root.alpha(root.verdict ? root.verdict.color : root.foreground, 0.10)
-                border.width: 1
-                border.color: root.alpha(root.verdict ? root.verdict.color : root.foreground, 0.25)
-
-                Row {
-                  id: verdictStripContent
-                  anchors.left: parent.left
-                  anchors.right: parent.right
-                  anchors.verticalCenter: parent.verticalCenter
-                  anchors.leftMargin: Style.space(10)
-                  anchors.rightMargin: Style.space(10)
-                  spacing: Style.space(8)
-
-                  Rectangle {
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(8)
-                    height: width
-                    radius: width / 2
-                    color: root.verdict ? root.verdict.color : root.foreground
-                  }
-
-                  Column {
-                    width: parent.width - Style.space(16)
-                    spacing: Style.space(2)
-
-                    Text {
-                      width: parent.width
-                      text: root.verdict ? root.verdict.title : ""
-                      textFormat: Text.PlainText
-                      color: root.verdict ? root.verdict.color : root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.body
-                      font.bold: true
-                    }
-
-                    Text {
-                      visible: text !== ""
-                      width: parent.width
-                      text: root.verdictDetail
-                      textFormat: Text.PlainText
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                      wrapMode: Text.WordWrap
-                    }
-                  }
-                }
+                horizontalAlignment: Text.AlignHCenter
+                text: root.balance ? root.formatMoney(root.balance.remaining, root.balance.currency) + " of "
+                  + root.formatMoney(root.balance.funded, root.balance.currency) + " left" : ""
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
               }
             }
           }
@@ -2538,6 +2553,7 @@ Panel {
           // ---------- Today at a glance ----------
           Row {
             id: todayTiles
+            opacity: root.viewFade
             visible: root.viewTab === "usage" && !root.settingsOpen && !!root.provider && root.provider.hasLocalStats !== false
               && (root.hasActivity || todayTokens > 0 || root.provider.todayPrompts > 0 || root.provider.todaySessions > 0)
             width: parent.width
@@ -2588,14 +2604,156 @@ Panel {
             }
           }
 
+          // ---------- Upcoming resets (every provider) ----------
+          // When room comes back, across every subscription, soonest first:
+          // the answer to "can I switch to something that resets sooner?".
+          BorderSurface {
+            id: resetsCard
+            visible: root.viewTab === "usage" && !root.settingsOpen && root.upcomingResets.length > 0
+            opacity: root.viewFade
+            width: parent.width
+            implicitHeight: resetsContent.implicitHeight + Style.space(28)
+            color: root.alpha(root.foreground, 0.035)
+            borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+            radius: root.cardRadius
+
+            Column {
+              id: resetsContent
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(14)
+              anchors.rightMargin: Style.space(14)
+              spacing: Style.space(4)
+
+              CardTitle {
+                width: parent.width
+                glyph: "󰦛"
+                text: "Upcoming resets"
+                note: "all subscriptions"
+              }
+
+              Repeater {
+                model: Math.min(4, root.upcomingResets.length)
+
+                Rectangle {
+                  id: resetRow
+                  required property int index
+                  readonly property var entry: root.upcomingResets[index] || ({})
+                  readonly property bool blocked: Number(entry.percent) >= 1
+                  readonly property bool current: !!root.provider && root.provider.providerId === entry.providerId
+                  width: resetsContent.width
+                  height: Style.space(38)
+                  radius: root.controlRadius
+                  color: resetRowHover.containsMouse ? root.alpha(root.foreground, 0.05)
+                    : (current ? root.alpha(Commons.Color.accent, 0.07) : "transparent")
+
+                  MouseArea {
+                    id: resetRowHover
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.selectedProviderId = resetRow.entry.providerId
+                  }
+
+                  // The clock time leads: it is what you plan around.
+                  Column {
+                    id: resetWhen
+                    anchors.left: parent.left
+                    anchors.leftMargin: Style.space(6)
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(78)
+
+                    Text {
+                      text: resetRow.entry.clock || ""
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                      font.bold: true
+                    }
+
+                    Text {
+                      text: resetRow.entry.day || ""
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+
+                  ProviderMark {
+                    id: resetMark
+                    anchors.left: resetWhen.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(16)
+                    height: width
+                    provider: resetRow.entry.provider || null
+                  }
+
+                  Column {
+                    anchors.left: resetMark.right
+                    anchors.leftMargin: Style.space(8)
+                    anchors.right: resetGain.left
+                    anchors.rightMargin: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    Text {
+                      width: parent.width
+                      text: (resetRow.entry.providerName || "") + " · " + (resetRow.entry.title || "")
+                      textFormat: Text.PlainText
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      elide: Text.ElideRight
+                    }
+
+                    Text {
+                      width: parent.width
+                      text: "in " + root.formatDuration(Number(resetRow.entry.inMs) || 0)
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+
+                  // What the reset hands back: a blocked window unlocks,
+                  // anything else frees the share it has used.
+                  Rectangle {
+                    id: resetGain
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.space(6)
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: resetGainText.implicitWidth + Style.space(14)
+                    height: resetGainText.implicitHeight + Style.space(6)
+                    radius: height / 2
+                    readonly property color tone: resetRow.blocked ? root.urgent
+                      : root.colorForSeverity(root.severityForPercent(Number(resetRow.entry.percent) || 0)) === root.foreground
+                        ? Commons.Color.accent : root.colorForSeverity(root.severityForPercent(Number(resetRow.entry.percent) || 0))
+                    color: root.alpha(tone, 0.16)
+
+                    Text {
+                      id: resetGainText
+                      anchors.centerIn: parent
+                      text: resetRow.blocked ? "unlocks" : "frees " + Math.round(Number(resetRow.entry.percent || 0) * 100) + "%"
+                      color: root.textFor(resetGain.tone)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      font.bold: true
+                    }
+                  }
+                }
+              }
+            }
+          }
+
           BorderSurface {
             id: balanceSection
+            opacity: root.viewFade
             visible: root.viewTab === "usage" && !root.settingsOpen && !!root.balance
             width: parent.width
             implicitHeight: balanceContent.implicitHeight + Style.space(28)
             color: root.alpha(root.foreground, 0.035)
             borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-            radius: Style.cornerRadius
+            radius: root.cardRadius
 
             // The meter shows what is left, not what is used: a prepaid
             // account drains toward empty rather than filling toward a cap.
@@ -2666,12 +2824,13 @@ Panel {
 
           BorderSurface {
             id: limitsSection
+            opacity: root.viewFade
             visible: root.viewTab === "usage" && !root.settingsOpen && root.otherLimits.length > 0
             width: parent.width
             implicitHeight: limitsContent.implicitHeight + Style.space(28)
             color: root.alpha(root.foreground, 0.035)
             borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-            radius: Style.cornerRadius
+            radius: root.cardRadius
 
             Column {
               id: limitsContent
@@ -2690,10 +2849,13 @@ Panel {
               }
 
               Repeater {
-                model: root.otherLimits
+                // Indexed, so a refresh updates rows in place instead of
+                // rebuilding them (rebuilt rows re-animated and re-laid out).
+                model: (root.otherLimits).length
 
                 LimitRow {
-                  required property var modelData
+                  readonly property var modelData: (root.otherLimits)[index] || ({})
+                  required property int index
                   width: limitsContent.width
                   window: modelData
                 }
@@ -2707,13 +2869,14 @@ Panel {
           // bar uses. Selecting a row shows that account above.
           BorderSurface {
             id: accountsCard
+            opacity: root.viewFade
             visible: root.viewTab === "usage" && (root.accountBrand === "claude" || root.accountBrand === "codex")
               && root.accountRows.length > 1 && !root.settingsOpen
             width: parent.width
             implicitHeight: accountComparison.implicitHeight + Style.space(28)
             color: root.alpha(root.foreground, 0.035)
             borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-            radius: Style.cornerRadius
+            radius: root.cardRadius
 
             Column {
               id: accountComparison
@@ -2732,11 +2895,14 @@ Panel {
               }
 
               Repeater {
-                model: root.accountRows
+                // Indexed, so a refresh updates rows in place instead of
+                // rebuilding them (rebuilt rows re-animated and re-laid out).
+                model: (root.accountRows).length
 
                 Rectangle {
                   id: accountRow
-                  required property var modelData
+                  readonly property var modelData: (root.accountRows)[index] || ({})
+                  required property int index
                   readonly property bool current: !!root.provider && root.provider.providerId === modelData.providerId
                   readonly property var meter: root.chipMeter(modelData)
                   readonly property var next: {
@@ -2750,7 +2916,7 @@ Panel {
                   }
                   width: accountComparison.width
                   height: Style.space(48)
-                  radius: Style.cornerRadius
+                  radius: root.controlRadius
                   color: current ? root.alpha(Commons.Color.accent, 0.10)
                     : (accountRowHover.containsMouse ? root.alpha(root.foreground, 0.05) : "transparent")
                   border.width: current ? 1 : 0
@@ -2823,6 +2989,8 @@ Panel {
                   }
 
                   LaunchAccountButton {
+
+                    radius: root.controlRadius
                     id: useAccountButton
                     anchors.right: parent.right
                     anchors.rightMargin: Style.space(6)
@@ -2841,6 +3009,7 @@ Panel {
           // blank strip under the tabs.
           BorderSurface {
             id: emptyViewCard
+            opacity: root.viewFade
             readonly property bool viewEmpty: root.viewTab === "usage"
               ? !(todayTiles.visible || balanceSection.visible || limitsSection.visible || accountsCard.visible)
               : root.viewTab === "activity" ? !(activityCard.visible || historyCard.visible)
@@ -2851,7 +3020,7 @@ Panel {
             implicitHeight: emptyViewContent.implicitHeight + Style.space(32)
             color: "transparent"
             borderSpec: Border.flat(root.alpha(root.foreground, 0.14), 1)
-            radius: Style.cornerRadius
+            radius: root.cardRadius
 
             Column {
               id: emptyViewContent
@@ -2892,210 +3061,19 @@ Panel {
             }
           }
 
-          // ---------- Activity calendar (Details) ----------
-          // Five weeks (collectors keep up to 31 days) of the selected
-          // provider's daily tokens as a calendar
-          // heatmap: rows are weeks, columns Monday..Sunday. A day outside
-          // the collector's record is drawn hollow, never as a quiet zero.
-          BorderSurface {
-            id: activityCard
-            visible: root.viewTab === "activity" && !root.settingsOpen && root.hasActivity && !!root.heatmap
-            width: parent.width
-            implicitHeight: activityContent.implicitHeight + Style.space(28)
-            color: root.alpha(root.foreground, 0.035)
-            borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-            radius: Style.cornerRadius
-
-            Column {
-              id: activityContent
-              anchors.left: parent.left
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              anchors.leftMargin: Style.space(14)
-              anchors.rightMargin: Style.space(14)
-              spacing: Style.space(10)
-
-              CardTitle {
-                width: parent.width
-                glyph: "󰸘"
-                text: "Activity"
-                note: root.activity ? root.activity.activeDays + " active of " + root.activity.recordedDays + " days" : ""
-              }
-
-              Row {
-                width: parent.width
-                spacing: Style.space(4)
-                readonly property real cellWidth: (width - spacing * 6) / 7
-
-                Repeater {
-                  model: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-
-                  Text {
-                    required property var modelData
-                    width: parent.cellWidth
-                    text: modelData
-                    horizontalAlignment: Text.AlignHCenter
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
-                }
-              }
-
-              Column {
-                width: parent.width
-                spacing: Style.space(4)
-
-                Repeater {
-                  model: root.heatmap ? root.heatmap.weeks : []
-
-                  Row {
-                    id: heatWeek
-                    required property var modelData
-                    width: parent.width
-                    spacing: Style.space(4)
-                    readonly property real cellWidth: (width - spacing * 6) / 7
-
-                    Repeater {
-                      model: heatWeek.modelData
-
-                      Rectangle {
-                        id: heatCell
-                        required property var modelData
-                        width: heatWeek.cellWidth
-                        height: Style.space(22)
-                        radius: Math.min(Style.cornerRadius, Style.space(6))
-                        color: heatCell.modelData.future || heatCell.modelData.missing
-                          ? "transparent" : root.heatColor(heatCell.modelData.level)
-                        border.width: heatCell.modelData.today ? 2 : (heatCell.modelData.missing && !heatCell.modelData.future ? 1 : 0)
-                        border.color: heatCell.modelData.today ? root.foreground : root.alpha(root.foreground, 0.10)
-                        opacity: heatCell.modelData.future ? 0.0 : 1.0
-
-                        Text {
-                          anchors.centerIn: parent
-                          text: Number(String(heatCell.modelData.date).slice(8, 10))
-                          color: heatCell.modelData.future || heatCell.modelData.missing
-                            ? root.dim : root.inkOn(root.heatColor(heatCell.modelData.level))
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.caption
-                          font.bold: heatCell.modelData.today
-                        }
-
-                        MouseArea {
-                          id: heatHover
-                          anchors.fill: parent
-                          hoverEnabled: !heatCell.modelData.future
-                          acceptedButtons: Qt.NoButton
-                        }
-
-                        PanelToolTip {
-                          visible: heatHover.containsMouse
-                          text: heatCell.modelData.missing
-                            ? root.shortHistoryDate(heatCell.modelData.date) + " · no record"
-                            : root.dayTooltip({ date: heatCell.modelData.date, messageCount: heatCell.modelData.value },
-                                heatCell.modelData.today)
-                          fontFamily: root.fontFamily
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-
-              Item {
-                width: parent.width
-                implicitHeight: heatLegend.implicitHeight
-
-                Row {
-                  id: heatLegend
-                  anchors.right: parent.right
-                  spacing: Style.space(4)
-
-                  Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "Less"
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
-
-                  Repeater {
-                    model: [0, 1, 2, 3, 4]
-
-                    Rectangle {
-                      required property int modelData
-                      anchors.verticalCenter: parent.verticalCenter
-                      width: Style.space(10)
-                      height: width
-                      radius: Style.space(3)
-                      color: root.heatColor(modelData)
-                    }
-                  }
-
-                  Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "More"
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
-                }
-
-                Text {
-                  anchors.left: parent.left
-                  anchors.verticalCenter: heatLegend.verticalCenter
-                  text: root.heatmap && root.heatmap.peak > 0
-                    ? "Peak " + usage.formatTokenCount(root.heatmap.peak) + " / day" : ""
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-              }
-
-              Row {
-                width: parent.width
-                spacing: Style.space(8)
-                readonly property real tileWidth: (width - spacing * 2) / 3
-
-                StatTile {
-                  width: parent.tileWidth
-                  label: "Recorded"
-                  valueText: root.activity ? usage.formatTokenCount(root.activity.total) : "—"
-                  hint: "tokens recorded"
-                }
-
-                StatTile {
-                  width: parent.tileWidth
-                  label: "7-day avg"
-                  valueText: root.activity && root.activity.avg7 >= 0
-                    ? usage.formatTokenCount(Math.round(root.activity.avg7)) : "—"
-                  hint: "tokens / day"
-                }
-
-                StatTile {
-                  width: parent.tileWidth
-                  label: "Week vs last"
-                  valueText: root.activity && root.activity.weekChange !== null
-                    ? Insights.formatChange(root.activity.weekChange) : "—"
-                  hint: root.activity && root.activity.weekChange !== null
-                    ? (root.activity.weekChange === 0 ? "same usage" : (root.activity.weekChange > 0 ? "busier week" : "quieter week")) : "needs 14 days"
-                }
-              }
-            }
-          }
-
           // ---------- Token mix (Details) ----------
           // Where the tokens actually went: fresh input, output, and prompt
           // cache traffic, with the cache hit share that explains why a
           // "billion-token" month is mostly cheap cache reads.
           BorderSurface {
             id: tokenMixCard
+            opacity: root.viewFade
             visible: root.viewTab === "models" && !root.settingsOpen && !!root.tokenMixData && root.tokenMixData.total > 0
             width: parent.width
             implicitHeight: tokenMixContent.implicitHeight + Style.space(28)
             color: root.alpha(root.foreground, 0.035)
             borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-            radius: Style.cornerRadius
+            radius: root.cardRadius
 
             readonly property var segments: {
               var m = root.tokenMixData
@@ -3214,6 +3192,7 @@ Panel {
           // viewer to infer it from bar height.
           BorderSurface {
             id: historyCard
+            opacity: root.viewFade
             // Nothing to plot for a provider that reports no daily history
             // at all (a billing-only collector); an empty "0 days" card was
             // just noise.
@@ -3223,7 +3202,7 @@ Panel {
             implicitHeight: historySection.implicitHeight + Style.space(28)
             color: root.alpha(root.foreground, 0.035)
             borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-            radius: Style.cornerRadius
+            radius: root.cardRadius
 
           Column {
             id: historySection
@@ -3451,10 +3430,12 @@ Panel {
               height: Style.space(14)
 
               Repeater {
-                model: root.historySeries && root.historySeries.points ? root.historySeries.points : []
+                // Indexed, so a refresh updates rows in place instead of
+                // rebuilding them (rebuilt rows re-animated and re-laid out).
+                model: (root.historySeries && root.historySeries.points ? root.historySeries.points : []).length
 
                 Text {
-                  required property var modelData
+                  readonly property var modelData: (root.historySeries && root.historySeries.points ? root.historySeries.points : [])[index] || ({})
                   required property int index
                   readonly property int count: root.historySeries && root.historySeries.points
                     ? root.historySeries.points.length : 0
@@ -3476,18 +3457,218 @@ Panel {
           }
           }
 
+          // ---------- Activity calendar (Details) ----------
+          // Five weeks (collectors keep up to 31 days) of the selected
+          // provider's daily tokens as a calendar
+          // heatmap: rows are weeks, columns Monday..Sunday. A day outside
+          // the collector's record is drawn hollow, never as a quiet zero.
+          BorderSurface {
+            id: activityCard
+            opacity: root.viewFade
+            visible: root.viewTab === "activity" && !root.settingsOpen && root.hasActivity && !!root.heatmap
+            width: parent.width
+            implicitHeight: activityContent.implicitHeight + Style.space(28)
+            color: root.alpha(root.foreground, 0.035)
+            borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+            radius: root.cardRadius
+
+            Column {
+              id: activityContent
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(14)
+              anchors.rightMargin: Style.space(14)
+              spacing: Style.space(10)
+
+              CardTitle {
+                width: parent.width
+                glyph: "󰸘"
+                text: "Activity"
+                note: root.activity ? root.activity.activeDays + " active of " + root.activity.recordedDays + " days" : ""
+              }
+
+              Row {
+                width: parent.width
+                spacing: Style.space(4)
+                readonly property real cellWidth: (width - spacing * 6) / 7
+
+                Repeater {
+                  model: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+                  Text {
+                    required property var modelData
+                    width: parent.cellWidth
+                    text: modelData
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+              }
+
+              Column {
+                width: parent.width
+                spacing: Style.space(4)
+
+                Repeater {
+                  // Indexed, so a refresh updates rows in place instead of
+                  // rebuilding them (rebuilt rows re-animated and re-laid out).
+                  model: (root.heatmap ? root.heatmap.weeks : []).length
+
+                  Row {
+                    id: heatWeek
+                    readonly property var modelData: (root.heatmap ? root.heatmap.weeks : [])[index] || ({})
+                    required property int index
+                    width: parent.width
+                    spacing: Style.space(4)
+                    readonly property real cellWidth: (width - spacing * 6) / 7
+
+                    Repeater {
+                      // Indexed, so a refresh updates rows in place instead of
+                      // rebuilding them (rebuilt rows re-animated and re-laid out).
+                      model: (heatWeek.modelData).length
+
+                      Rectangle {
+                        id: heatCell
+                        readonly property var modelData: (heatWeek.modelData)[index] || ({})
+                        required property int index
+                        width: heatWeek.cellWidth
+                        height: Style.space(22)
+                        radius: Style.space(6)
+                        color: heatCell.modelData.future || heatCell.modelData.missing
+                          ? "transparent" : root.heatColor(heatCell.modelData.level)
+                        border.width: heatCell.modelData.today ? 2 : (heatCell.modelData.missing && !heatCell.modelData.future ? 1 : 0)
+                        border.color: heatCell.modelData.today ? root.foreground : root.alpha(root.foreground, 0.10)
+                        opacity: heatCell.modelData.future ? 0.0 : 1.0
+
+                        Text {
+                          anchors.centerIn: parent
+                          text: Number(String(heatCell.modelData.date).slice(8, 10))
+                          color: heatCell.modelData.future || heatCell.modelData.missing
+                            ? root.dim : root.inkOn(root.heatColor(heatCell.modelData.level))
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                          font.bold: heatCell.modelData.today
+                        }
+
+                        MouseArea {
+                          id: heatHover
+                          anchors.fill: parent
+                          hoverEnabled: !heatCell.modelData.future
+                          acceptedButtons: Qt.NoButton
+                        }
+
+                        PanelToolTip {
+                          visible: heatHover.containsMouse
+                          text: heatCell.modelData.missing
+                            ? root.shortHistoryDate(heatCell.modelData.date) + " · no record"
+                            : root.dayTooltip({ date: heatCell.modelData.date, messageCount: heatCell.modelData.value },
+                                heatCell.modelData.today)
+                          fontFamily: root.fontFamily
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+              Item {
+                width: parent.width
+                implicitHeight: heatLegend.implicitHeight
+
+                Row {
+                  id: heatLegend
+                  anchors.right: parent.right
+                  spacing: Style.space(4)
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Less"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Repeater {
+                    model: [0, 1, 2, 3, 4]
+
+                    Rectangle {
+                      required property int modelData
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: Style.space(10)
+                      height: width
+                      radius: Style.space(3)
+                      color: root.heatColor(modelData)
+                    }
+                  }
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "More"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                Text {
+                  anchors.left: parent.left
+                  anchors.verticalCenter: heatLegend.verticalCenter
+                  text: root.heatmap && root.heatmap.peak > 0
+                    ? "Peak " + usage.formatTokenCount(root.heatmap.peak) + " / day" : ""
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
+                readonly property real tileWidth: (width - spacing * 2) / 3
+
+                StatTile {
+                  width: parent.tileWidth
+                  label: "Recorded"
+                  valueText: root.activity ? usage.formatTokenCount(root.activity.total) : "—"
+                  hint: "tokens recorded"
+                }
+
+                StatTile {
+                  width: parent.tileWidth
+                  label: "7-day avg"
+                  valueText: root.activity && root.activity.avg7 >= 0
+                    ? usage.formatTokenCount(Math.round(root.activity.avg7)) : "—"
+                  hint: "tokens / day"
+                }
+
+                StatTile {
+                  width: parent.tileWidth
+                  label: "Week vs last"
+                  valueText: root.activity && root.activity.weekChange !== null
+                    ? Insights.formatChange(root.activity.weekChange) : "—"
+                  hint: root.activity && root.activity.weekChange !== null
+                    ? (root.activity.weekChange === 0 ? "same usage" : (root.activity.weekChange > 0 ? "busier week" : "quieter week")) : "needs 14 days"
+                }
+              }
+            }
+          }
+
           // ---------- Token usage by model ----------
           // Details starts with the useful accounting view. Price information
           // lives in the analytics card below, so this table stays about the
           // provider's actual recorded token use and never repeats a cost.
           BorderSurface {
             id: detailModelSection
+            opacity: root.viewFade
             visible: root.viewTab === "models" && !root.settingsOpen && root.detailModels.length > 0
             width: parent.width
             implicitHeight: detailModelContent.implicitHeight + Style.space(28)
             color: root.alpha(root.foreground, 0.035)
             borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-            radius: Style.cornerRadius
+            radius: root.cardRadius
 
             Column {
               id: detailModelContent
@@ -3532,10 +3713,13 @@ Panel {
               }
 
               Repeater {
-                model: root.detailModels
+                // Indexed, so a refresh updates rows in place instead of
+                // rebuilding them (rebuilt rows re-animated and re-laid out).
+                model: (root.detailModels).length
 
                 ModelRow {
-                  required property var modelData
+                  readonly property var modelData: (root.detailModels)[index] || ({})
+                  required property int index
                   width: detailModelContent.width
                   row: modelData
                   share: modelData.total / Math.max(1, root.detailModels[0].total)
@@ -3545,12 +3729,13 @@ Panel {
           }
 
           // ---------- Plan vs API (Details only) ----------------------------
-          // The Cost view answers two questions in order: what this account's
-          // recorded usage would cost at published API rates (an equivalent,
-          // never an invoice or a subscription price), then how every
-          // provider compares, with its real plan usage or credit beside it.
+          // The Cost view, kept to two cards: what this account's recorded
+          // usage would cost at published API rates (an equivalent, never an
+          // invoice or a subscription price), then how the providers that
+          // have an estimate compare.
           Column {
             id: costSection
+            opacity: root.viewFade
             visible: root.expanded && !root.settingsOpen && root.viewTab === "cost"
               && root.costProviderRows.length > 0
             width: parent.width
@@ -3562,8 +3747,20 @@ Panel {
               width: parent.width
               implicitHeight: costValueContent.implicitHeight + Style.space(36)
               color: root.alpha(root.foreground, 0.035)
-              borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-              radius: Style.cornerRadius
+              borderSpec: Border.flat(root.alpha(Commons.Color.accent, root.cost ? 0.24 : 0.12), 1)
+              radius: root.cardRadius
+
+              Rectangle {
+                visible: !!root.cost
+                anchors.fill: parent
+                anchors.margins: 1
+                radius: parent.radius
+                gradient: Gradient {
+                  orientation: Gradient.Vertical
+                  GradientStop { position: 0; color: root.alpha(Commons.Color.accent, 0.10) }
+                  GradientStop { position: 0.45; color: root.alpha(Commons.Color.accent, 0.0) }
+                }
+              }
 
               Column {
                 id: costValueContent
@@ -3572,7 +3769,7 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.leftMargin: Style.space(18)
                 anchors.rightMargin: Style.space(18)
-                spacing: Style.space(14)
+                spacing: Style.space(16)
 
                 CardTitle {
                   width: parent.width
@@ -3613,7 +3810,7 @@ Panel {
                   visible: !!root.provider && (!root.cost || root.cost.incomplete)
                   width: parent.width
                   text: !root.cost
-                    ? "No priced token total for this provider yet. Estimates come from collectors that record per-model tokens with a published API rate; the comparison below still shows every provider's plan usage."
+                    ? "No priced token total for this provider yet. Estimates come from collectors that record per-model tokens with a published API rate."
                     : "Partial estimate · " + root.unpricedModelText(root.cost)
                   textFormat: Text.PlainText
                   color: root.dim
@@ -3625,35 +3822,27 @@ Panel {
 
                 Row {
                   id: costMetrics
-                  visible: !!root.cost
+                  visible: !!root.cost && !!root.costSummary && root.costSummary.hasDailyAverage
                   width: parent.width
                   spacing: Style.space(10)
-                  readonly property real cellWidth: (width - spacing * 2) / 3
 
-                  CostMetric {
-                    width: costMetrics.cellWidth
+                  CostChip {
+                    width: (costMetrics.width - costMetrics.spacing) / 2
                     valueText: root.costSummary && root.costSummary.hasDailyAverage
                       ? root.formatUsd(root.costSummary.averageDailyUsd) : "—"
-                    label: "Avg / day"
+                    label: "a day"
                     hint: root.costSummary && root.costSummary.hasDailyAverage
-                      ? root.costSummary.averageDailyDays + " recorded days" : "No day count"
+                      ? root.costSummary.averageDailyDays + "-day average" : ""
                   }
 
-                  // What a month at the recorded daily average would come
-                  // to — the number to hold against a plan's price.
-                  CostMetric {
-                    width: costMetrics.cellWidth
+                  // A month at that average — the number to hold against a
+                  // plan's price.
+                  CostChip {
+                    width: (costMetrics.width - costMetrics.spacing) / 2
                     valueText: root.costSummary && root.costSummary.hasDailyAverage
                       ? root.formatUsd(root.costSummary.averageDailyUsd * 30) : "—"
-                    label: "30-day pace"
+                    label: "per 30 days"
                     hint: "at that average"
-                  }
-
-                  CostMetric {
-                    width: costMetrics.cellWidth
-                    valueText: root.costPlanValue(root.costProviderRow(root.provider))
-                    label: root.costPlanLabel(root.costProviderRow(root.provider))
-                    hint: root.costPlanHint(root.costProviderRow(root.provider))
                   }
                 }
 
@@ -3695,12 +3884,12 @@ Panel {
                     id: costDailyChart
                     visible: root.costDailyRows.length > 0
                     width: parent.width
-                    height: Style.space(150)
+                    height: Style.space(130)
 
-                    readonly property real axisLeft: Style.space(48)
-                    readonly property real axisRight: Style.space(4)
-                    readonly property real axisTop: Style.space(10)
-                    readonly property real axisBottom: Style.space(24)
+                    readonly property real axisLeft: Style.space(44)
+                    readonly property real axisRight: Style.space(2)
+                    readonly property real axisTop: Style.space(8)
+                    readonly property real axisBottom: Style.space(22)
                     readonly property real plotWidth: Math.max(0, width - axisLeft - axisRight)
                     readonly property real plotHeight: Math.max(0, height - axisTop - axisBottom)
                     readonly property real peak: root.costSummary
@@ -3732,35 +3921,39 @@ Panel {
                           x: costDailyChart.axisLeft
                           width: costDailyChart.plotWidth
                           height: 1
-                          color: root.alpha(root.foreground, 0.12)
+                          color: root.alpha(root.foreground, 0.10)
                         }
                       }
                     }
 
                     Repeater {
-                      model: root.costDailyRows
+                      // Indexed, so a refresh updates bars in place.
+                      model: (root.costDailyRows).length
 
                       Item {
                         id: costDayBar
-                        required property var modelData
                         required property int index
+                        readonly property var modelData: (root.costDailyRows)[index] || ({})
+                        readonly property bool latest: index === root.costDailyRows.length - 1
                         width: costDailyChart.plotWidth / Math.max(1, root.costDailyRows.length)
                         height: costDailyChart.plotHeight
                         x: costDailyChart.axisLeft + index * width
                         y: costDailyChart.axisTop
 
                         Rectangle {
-                          width: Math.max(3, Math.min(parent.width * 0.66, parent.width - Style.space(3)))
+                          width: Math.max(3, Math.min(parent.width * 0.7, parent.width - Style.space(2)))
                           height: Number(costDayBar.modelData.usd || 0) > 0
                             ? Math.max(2, parent.height * Math.min(1,
                               Number(costDayBar.modelData.usd || 0) / Math.max(0.0001, costDailyChart.peak)))
                             : 1
                           anchors.bottom: parent.bottom
                           anchors.horizontalCenter: parent.horizontalCenter
-                          radius: Math.min(width / 2, Style.cornerRadius)
-                          color: costDayBar.index === root.costDailyRows.length - 1
-                            ? root.foreground : Commons.Color.accent
-                          opacity: costDayHover.containsMouse || costDayBar.index === root.costDailyRows.length - 1 ? 1.0 : 0.75
+                          radius: Math.min(width / 2, Style.space(3))
+                          gradient: Gradient {
+                            GradientStop { position: 0; color: costDayBar.latest ? root.foreground : Commons.Color.accent }
+                            GradientStop { position: 1; color: root.alpha(costDayBar.latest ? root.foreground : Commons.Color.accent, 0.35) }
+                          }
+                          opacity: costDayHover.containsMouse || costDayBar.latest ? 1.0 : 0.85
                         }
 
                         MouseArea {
@@ -3790,11 +3983,11 @@ Panel {
                       height: Style.space(16)
 
                       Repeater {
-                        model: root.costDailyRows
+                        model: (root.costDailyRows).length
 
                         Text {
-                          required property var modelData
                           required property int index
+                          readonly property var modelData: (root.costDailyRows)[index] || ({})
                           readonly property real slot: costDailyLabels.width / Math.max(1, root.costDailyRows.length)
                           x: root.clamp(index * slot + slot / 2 - implicitWidth / 2, 0,
                             Math.max(0, costDailyLabels.width - implicitWidth))
@@ -3812,11 +4005,13 @@ Panel {
                   }
                 }
 
+                // By model: one stacked bar in the series colors, then a
+                // legend line per model.
                 Column {
                   id: costModelChart
                   visible: root.costModelRows.length > 0
                   width: parent.width
-                  spacing: Style.space(2)
+                  spacing: Style.space(8)
 
                   Text {
                     text: "By model"
@@ -3826,14 +4021,58 @@ Panel {
                     font.bold: true
                   }
 
+                  Item {
+                    width: parent.width
+                    height: Style.space(10)
+                    clip: true
+
+                    Rectangle {
+                      anchors.fill: parent
+                      radius: height / 2
+                      color: root.track
+                    }
+
+                    Row {
+                      id: costModelStack
+                      anchors.fill: parent
+                      spacing: 2
+
+                      Repeater {
+                        model: (root.costModelRows).length
+
+                        Rectangle {
+                          required property int index
+                          readonly property var modelData: (root.costModelRows)[index] || ({})
+                          height: costModelStack.height
+                          width: Math.max(0, (costModelStack.width - costModelStack.spacing * Math.max(0, root.costModelRows.length - 1))
+                            * root.clamp(Number(modelData.share || 0), 0, 1))
+                          radius: height / 2
+                          color: root.seriesColor(index)
+                          visible: width >= 1
+                        }
+                      }
+                    }
+                  }
+
                   Repeater {
-                    model: root.costModelRows
+                    model: (root.costModelRows).length
 
                     Item {
                       id: costModelRow
-                      required property var modelData
+                      required property int index
+                      readonly property var modelData: (root.costModelRows)[index] || ({})
                       width: costModelChart.width
-                      height: Style.space(44)
+                      height: Style.space(22)
+
+                      Rectangle {
+                        id: costModelDot
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Style.space(8)
+                        height: width
+                        radius: width / 2
+                        color: root.seriesColor(costModelRow.index)
+                      }
 
                       Text {
                         id: costModelName
@@ -3843,11 +4082,11 @@ Panel {
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.bodySmall
                         elide: Text.ElideRight
-                        anchors.left: parent.left
+                        anchors.left: costModelDot.right
+                        anchors.leftMargin: Style.space(8)
                         anchors.right: costModelShare.left
                         anchors.rightMargin: Style.space(8)
                         anchors.verticalCenter: parent.verticalCenter
-                        anchors.verticalCenterOffset: -Style.space(3)
                       }
 
                       Text {
@@ -3858,7 +4097,7 @@ Panel {
                         font.pixelSize: Style.font.caption
                         anchors.right: costModelValue.left
                         anchors.rightMargin: Style.space(10)
-                        anchors.verticalCenter: costModelName.verticalCenter
+                        anchors.verticalCenter: parent.verticalCenter
                       }
 
                       Text {
@@ -3869,33 +4108,8 @@ Panel {
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.bodySmall
                         font.bold: true
-                        horizontalAlignment: Text.AlignRight
                         anchors.right: parent.right
-                        anchors.verticalCenter: costModelName.verticalCenter
-                      }
-
-                      Rectangle {
-                        id: costModelTrack
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        anchors.bottom: parent.bottom
-                        anchors.bottomMargin: Style.space(6)
-                        height: Math.max(Style.space(4), Math.round(Style.spacing.controlHeight * 0.12))
-                        radius: height / 2
-                        color: root.track
-                      }
-
-                      Rectangle {
-                        anchors.left: costModelTrack.left
-                        anchors.verticalCenter: costModelTrack.verticalCenter
-                        width: costModelTrack.width * root.clamp(Number(costModelRow.modelData.share || 0), 0, 1)
-                        height: costModelTrack.height
-                        radius: height / 2
-                        color: Commons.Color.accent
-
-                        Behavior on width {
-                          NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
-                        }
+                        anchors.verticalCenter: parent.verticalCenter
                       }
                     }
                   }
@@ -3940,10 +4154,9 @@ Panel {
               }
             }
 
-            // Every provider in one list: its mark and name, its real plan
-            // usage or credit (with the meter), and its API-rate estimate.
-            // Two lines per provider and no fixed-width columns, so nothing
-            // has to be cut to "Partial · A…".
+            // The providers that have an estimate, ranked, each with its
+            // share of the combined total; the rest are named once below
+            // rather than as rows of dashes.
             BorderSurface {
               id: costProviderOverview
               visible: root.costProviderRows.length > 0
@@ -3951,12 +4164,14 @@ Panel {
               implicitHeight: providerOverviewContent.implicitHeight + Style.space(28)
               color: root.alpha(root.foreground, 0.035)
               borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-              radius: Style.cornerRadius
+              radius: root.cardRadius
 
+              readonly property var priced: root.costProviderRows.filter(function(r) { return r.hasCost })
+                .sort(function(a, b) { return b.estimateUsd - a.estimateUsd })
+              readonly property var unpriced: root.costProviderRows.filter(function(r) { return !r.hasCost })
               readonly property real totalUsd: {
                 var total = 0
-                for (var i = 0; i < root.costProviderRows.length; i++)
-                  if (root.costProviderRows[i].hasCost) total += Number(root.costProviderRows[i].estimateUsd) || 0
+                for (var i = 0; i < priced.length; i++) total += Number(priced[i].estimateUsd) || 0
                 return total
               }
 
@@ -3967,19 +4182,19 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.leftMargin: Style.space(14)
                 anchors.rightMargin: Style.space(14)
-                spacing: Style.space(6)
+                spacing: Style.space(4)
 
                 CardTitle {
                   width: parent.width
                   glyph: "󰀏"
                   text: "All providers"
-                  note: costProviderOverview.totalUsd > 0 ? root.formatUsd(costProviderOverview.totalUsd) + " at API rates" : ""
+                  note: costProviderOverview.totalUsd > 0 ? root.formatUsd(costProviderOverview.totalUsd) + " total" : ""
                 }
 
                 Text {
                   width: parent.width
                   bottomPadding: Style.space(4)
-                  text: "Plan usage or credit beside each provider's API-rate estimate. Estimate periods vary by provider."
+                  text: "API-rate estimates side by side · periods vary by provider"
                   textFormat: Text.PlainText
                   color: root.dim
                   font.family: root.fontFamily
@@ -3988,133 +4203,19 @@ Panel {
                 }
 
                 Repeater {
-                  model: root.costProviderRows
+                  model: root.costProviderRows.length > 0 ? costProviderOverview.priced.length : 0
 
                   Rectangle {
                     id: providerCostRow
-                    required property var modelData
+                    required property int index
+                    readonly property var modelData: costProviderOverview.priced[index] || ({})
                     readonly property bool current: !!root.provider && root.provider.providerId === modelData.providerId
                     readonly property var live: root.providerById(modelData.providerId)
                     width: providerOverviewContent.width
-                    height: providerCostContent.implicitHeight + Style.space(16)
-                    radius: Style.cornerRadius
+                    height: Style.space(44)
+                    radius: root.controlRadius
                     color: current ? root.alpha(Commons.Color.accent, 0.10)
                       : (providerCostHover.containsMouse ? root.alpha(root.foreground, 0.04) : "transparent")
-                    border.width: current ? 1 : 0
-                    border.color: root.alpha(Commons.Color.accent, 0.30)
-
-                    Column {
-                      id: providerCostContent
-                      anchors.left: parent.left
-                      anchors.right: parent.right
-                      anchors.verticalCenter: parent.verticalCenter
-                      anchors.leftMargin: Style.space(8)
-                      anchors.rightMargin: Style.space(8)
-                      spacing: Style.space(5)
-
-                      Item {
-                        width: parent.width
-                        implicitHeight: Math.max(providerCostName.implicitHeight, providerCostApiValue.implicitHeight)
-
-                        ProviderMark {
-                          id: providerCostMark
-                          anchors.left: parent.left
-                          anchors.verticalCenter: parent.verticalCenter
-                          width: Style.space(16)
-                          height: width
-                          provider: providerCostRow.live || providerCostRow.modelData
-                        }
-
-                        Text {
-                          id: providerCostName
-                          text: String(providerCostRow.modelData.providerName || "Provider")
-                          textFormat: Text.PlainText
-                          color: root.foreground
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.bodySmall
-                          font.bold: true
-                          elide: Text.ElideRight
-                          anchors.left: providerCostMark.right
-                          anchors.leftMargin: Style.space(8)
-                          anchors.right: providerCostApiValue.left
-                          anchors.rightMargin: Style.space(8)
-                          anchors.verticalCenter: parent.verticalCenter
-                        }
-
-                        Text {
-                          id: providerCostApiValue
-                          text: root.costApiValue(providerCostRow.modelData)
-                          textFormat: Text.PlainText
-                          color: providerCostRow.modelData.hasCost ? root.foreground : root.dim
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.bodySmall
-                          font.bold: providerCostRow.modelData.hasCost
-                          anchors.right: parent.right
-                          anchors.verticalCenter: parent.verticalCenter
-                        }
-                      }
-
-                      Item {
-                        width: parent.width
-                        implicitHeight: Math.max(providerCostHint.implicitHeight, providerCostKind.implicitHeight)
-
-                        Text {
-                          id: providerCostHint
-                          text: {
-                            var row = providerCostRow.modelData
-                            var value = root.costPlanValue(row)
-                            var hint = root.costPlanHint(row)
-                            return value !== "—" ? value + " · " + hint : hint
-                          }
-                          textFormat: Text.PlainText
-                          color: root.dim
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.caption
-                          elide: Text.ElideRight
-                          anchors.left: parent.left
-                          anchors.leftMargin: Style.space(24)
-                          anchors.right: providerCostKind.left
-                          anchors.rightMargin: Style.space(8)
-                          anchors.verticalCenter: parent.verticalCenter
-                        }
-
-                        Text {
-                          id: providerCostKind
-                          text: !providerCostRow.modelData.hasCost ? "no estimate"
-                            : (providerCostRow.modelData.incomplete ? "partial" : "estimate")
-                              + (providerCostRow.modelData.period ? " · " + providerCostRow.modelData.period : "")
-                          textFormat: Text.PlainText
-                          color: root.dim
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.caption
-                          anchors.right: parent.right
-                          anchors.verticalCenter: parent.verticalCenter
-                        }
-                      }
-
-                      Item {
-                        visible: Number(providerCostRow.modelData.usagePercent) >= 0
-                        width: parent.width
-                        height: Math.max(Style.space(4), Math.round(Style.spacing.controlHeight * 0.12))
-
-                        Rectangle {
-                          id: providerUsageTrack
-                          anchors.fill: parent
-                          anchors.leftMargin: Style.space(24)
-                          radius: height / 2
-                          color: root.track
-                        }
-
-                        Rectangle {
-                          anchors.left: providerUsageTrack.left
-                          anchors.verticalCenter: providerUsageTrack.verticalCenter
-                          width: providerUsageTrack.width * root.clamp(Number(providerCostRow.modelData.usagePercent || 0), 0, 1)
-                          height: providerUsageTrack.height
-                          radius: providerUsageTrack.radius
-                          color: root.colorForSeverity(root.severityForPercent(Number(providerCostRow.modelData.usagePercent || 0)))
-                        }
-                      }
-                    }
 
                     MouseArea {
                       id: providerCostHover
@@ -4123,7 +4224,99 @@ Panel {
                       cursorShape: Qt.PointingHandCursor
                       onClicked: root.selectedProviderId = providerCostRow.modelData.providerId
                     }
+
+                    ProviderMark {
+                      id: providerCostMark
+                      anchors.left: parent.left
+                      anchors.leftMargin: Style.space(8)
+                      anchors.top: parent.top
+                      anchors.topMargin: Style.space(8)
+                      width: Style.space(16)
+                      height: width
+                      provider: providerCostRow.live || providerCostRow.modelData
+                    }
+
+                    Text {
+                      id: providerCostName
+                      text: String(providerCostRow.modelData.providerName || "Provider")
+                      textFormat: Text.PlainText
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                      elide: Text.ElideRight
+                      anchors.left: providerCostMark.right
+                      anchors.leftMargin: Style.space(8)
+                      anchors.right: providerCostKind.left
+                      anchors.rightMargin: Style.space(8)
+                      anchors.verticalCenter: providerCostMark.verticalCenter
+                    }
+
+                    Text {
+                      id: providerCostKind
+                      text: (providerCostRow.modelData.incomplete ? "partial" : "")
+                        + (providerCostRow.modelData.incomplete && providerCostRow.modelData.period ? " · " : "")
+                        + (providerCostRow.modelData.period || "")
+                      textFormat: Text.PlainText
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      anchors.right: providerCostApiValue.left
+                      anchors.rightMargin: Style.space(10)
+                      anchors.verticalCenter: providerCostMark.verticalCenter
+                    }
+
+                    Text {
+                      id: providerCostApiValue
+                      text: root.costApiValue(providerCostRow.modelData)
+                      textFormat: Text.PlainText
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                      anchors.right: parent.right
+                      anchors.rightMargin: Style.space(8)
+                      anchors.verticalCenter: providerCostMark.verticalCenter
+                    }
+
+                    // Share of the combined estimate, in the series color.
+                    Rectangle {
+                      id: providerShareTrack
+                      anchors.left: providerCostName.left
+                      anchors.right: parent.right
+                      anchors.rightMargin: Style.space(8)
+                      anchors.bottom: parent.bottom
+                      anchors.bottomMargin: Style.space(8)
+                      height: Math.max(Style.space(4), Math.round(Style.spacing.controlHeight * 0.12))
+                      radius: height / 2
+                      color: root.track
+                    }
+
+                    Rectangle {
+                      anchors.left: providerShareTrack.left
+                      anchors.verticalCenter: providerShareTrack.verticalCenter
+                      width: providerShareTrack.width * root.clamp(Number(providerCostRow.modelData.share || 0), 0, 1)
+                      height: providerShareTrack.height
+                      radius: height / 2
+                      color: root.seriesColor(providerCostRow.index)
+
+                      Behavior on width {
+                        NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
+                      }
+                    }
                   }
+                }
+
+                Text {
+                  visible: costProviderOverview.unpriced.length > 0
+                  width: parent.width
+                  topPadding: Style.space(4)
+                  text: "No estimate: " + costProviderOverview.unpriced.map(function(r) { return r.providerName }).join(", ")
+                  textFormat: Text.PlainText
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
                 }
               }
             }
@@ -4206,11 +4399,14 @@ Panel {
               }
 
               Repeater {
-                model: root.settingsProviders
+                // Indexed, so a refresh updates rows in place instead of
+                // rebuilding them (rebuilt rows re-animated and re-laid out).
+                model: (root.settingsProviders).length
 
                 BorderSurface {
                   id: providerSettingsRow
-                  required property var modelData
+                  readonly property var modelData: (root.settingsProviders)[index] || ({})
+                  required property int index
                   readonly property var liveProvider: root.providerById(modelData.providerId)
                   readonly property bool inBar: modelData.enabled && modelData.barRole !== "off"
                   width: providerSettingsList.width
@@ -4218,7 +4414,7 @@ Panel {
                   color: root.alpha(root.foreground, modelData.enabled ? 0.045 : 0.02)
                   borderSpec: Border.flat(root.alpha(modelData.enabled ? Commons.Color.accent : root.foreground,
                     modelData.enabled ? 0.22 : 0.10), 1)
-                  radius: Style.cornerRadius + Style.space(2)
+                  radius: root.cardRadius
 
                   Column {
                     id: providerCardContent
@@ -4239,7 +4435,7 @@ Panel {
                         anchors.verticalCenter: parent.verticalCenter
                         width: Style.space(34)
                         height: width
-                        radius: Style.cornerRadius
+                        radius: root.controlRadius
                         color: root.alpha(root.foreground, 0.06)
                         opacity: providerSettingsRow.modelData.enabled ? 1.0 : 0.5
 
@@ -4294,7 +4490,7 @@ Panel {
                         anchors.verticalCenter: parent.verticalCenter
                         height: Style.space(24)
                         width: barPreviewRow.implicitWidth + Style.space(16)
-                        radius: Style.cornerRadius
+                        radius: root.controlRadius
                         color: Commons.Color.bar.background
                         border.width: 1
                         border.color: root.alpha(root.foreground, 0.14)
@@ -4341,6 +4537,8 @@ Panel {
                       }
 
                       ToggleSwitch {
+
+                        rounded: true
                         id: providerToggle
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
@@ -4409,7 +4607,7 @@ Panel {
                 implicitHeight: noProvidersText.implicitHeight + Style.space(28)
                 color: root.alpha(root.foreground, 0.035)
                 borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-                radius: Style.cornerRadius
+                radius: root.cardRadius
 
                 Text {
                   id: noProvidersText
@@ -4432,7 +4630,7 @@ Panel {
                 implicitHeight: rotationContent.implicitHeight + Style.space(28)
                 color: root.alpha(root.foreground, 0.035)
                 borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-                radius: Style.cornerRadius
+                radius: root.cardRadius
 
                 Column {
                   id: rotationContent
@@ -4543,7 +4741,7 @@ Panel {
                 implicitHeight: accountListContent.implicitHeight + Style.space(24)
                 color: root.alpha(root.foreground, 0.035)
                 borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-                radius: Style.cornerRadius
+                radius: root.cardRadius
 
                 Column {
                   id: accountListContent
@@ -4573,7 +4771,7 @@ Panel {
                       readonly property bool active: usage.activeAccountId(accountSettingsContent.newProvider) === modelData
                       width: accountListContent.width
                       height: Math.max(accountRowText.implicitHeight, accountActions.implicitHeight) + Style.space(14)
-                      radius: Style.cornerRadius
+                      radius: root.controlRadius
                       color: active ? root.alpha(Commons.Color.accent, 0.10) : root.alpha(root.foreground, 0.03)
                       border.width: 1
                       border.color: active ? root.alpha(Commons.Color.accent, 0.35) : root.alpha(root.foreground, 0.08)
@@ -4638,6 +4836,8 @@ Panel {
                         spacing: Style.space(6)
 
                         Button {
+
+                          radius: root.controlRadius
                           id: loginButton
                           visible: !!configuredAccountRow.profile
                           text: enabled ? "Sign in" : "Preparing…"
@@ -4651,6 +4851,8 @@ Panel {
                         }
 
                         LaunchAccountButton {
+
+                          radius: root.controlRadius
                           id: launchAccountButton
                           providerBrand: accountSettingsContent.newProvider
                           accountId: configuredAccountRow.modelData
@@ -4658,6 +4860,8 @@ Panel {
                         }
 
                         Button {
+
+                          radius: root.controlRadius
                           id: removeButton
                           visible: !!configuredAccountRow.profile
                           width: Style.space(28)
@@ -4681,7 +4885,7 @@ Panel {
                 implicitHeight: addAccountContent.implicitHeight + Style.space(28)
                 color: root.alpha(root.foreground, 0.035)
                 borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-                radius: Style.cornerRadius
+                radius: root.cardRadius
 
                 Column {
                   id: addAccountContent
@@ -4714,7 +4918,7 @@ Panel {
                     Rectangle {
                       width: parent.width - addAccountButton.width - parent.spacing
                       height: Style.space(32)
-                      radius: Style.cornerRadius
+                      radius: root.controlRadius
                       color: root.alpha(root.foreground, 0.06)
                       border.width: 1
                       border.color: accountNameInput.activeFocus ? Commons.Color.accent : root.alpha(root.foreground, 0.2)
@@ -4745,6 +4949,8 @@ Panel {
                     }
 
                     Button {
+
+                      radius: root.controlRadius
                       id: addAccountButton
                       height: Style.space(32)
                       text: "Add"
@@ -4766,7 +4972,7 @@ Panel {
                 implicitHeight: importAccountContent.implicitHeight + Style.space(28)
                 color: root.alpha(root.foreground, 0.035)
                 borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-                radius: Style.cornerRadius
+                radius: root.cardRadius
 
                 Column {
                   id: importAccountContent
@@ -4795,7 +5001,7 @@ Panel {
                   Rectangle {
                     width: parent.width
                     height: Style.space(72)
-                    radius: Style.cornerRadius
+                    radius: root.controlRadius
                     color: root.alpha(root.foreground, 0.06)
                     border.width: 1
                     border.color: accountPathsInput.activeFocus ? Commons.Color.accent : root.alpha(root.foreground, 0.2)
@@ -4830,6 +5036,8 @@ Panel {
                     spacing: Style.space(10)
 
                     Button {
+
+                      radius: root.controlRadius
                       id: importAccountsButton
                       anchors.verticalCenter: parent.verticalCenter
                       text: usage.accountImportRunning ? "Importing…" : "Import"
@@ -4870,7 +5078,7 @@ Panel {
                 implicitHeight: displayContent.implicitHeight + Style.space(28)
                 color: root.alpha(root.foreground, 0.035)
                 borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-                radius: Style.cornerRadius
+                radius: root.cardRadius
 
                 Column {
                   id: displayContent
@@ -4918,7 +5126,7 @@ Panel {
                 implicitHeight: refreshContent.implicitHeight + Style.space(28)
                 color: root.alpha(root.foreground, 0.035)
                 borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-                radius: Style.cornerRadius
+                radius: root.cardRadius
 
                 Column {
                   id: refreshContent
@@ -4973,7 +5181,7 @@ Panel {
                 implicitHeight: thresholdContent.implicitHeight + Style.space(28)
                 color: root.alpha(root.foreground, 0.035)
                 borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-                radius: Style.cornerRadius
+                radius: root.cardRadius
 
                 Column {
                   id: thresholdContent
@@ -5024,7 +5232,7 @@ Panel {
                         x: Math.min(thresholdScale.xFor(0), thresholdScale.xFor(thresholdScale.warnUsed))
                         width: Math.abs(thresholdScale.xFor(thresholdScale.warnUsed) - thresholdScale.xFor(0))
                         height: parent.height
-                        color: root.colorForSeverity("ok")
+                        color: usage.colorfulUsageMeters ? root.colorForSeverity("ok") : Commons.Color.accent
                         opacity: 0.55
                       }
 
@@ -5129,7 +5337,7 @@ Panel {
                 implicitHeight: notifyContent.implicitHeight + Style.space(28)
                 color: root.alpha(root.foreground, 0.035)
                 borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-                radius: Style.cornerRadius
+                radius: root.cardRadius
 
                 Column {
                   id: notifyContent
@@ -5162,6 +5370,8 @@ Panel {
                     spacing: Style.space(10)
 
                     Button {
+
+                      radius: root.controlRadius
                       anchors.verticalCenter: parent.verticalCenter
                       text: "Send a test"
                       tooltipText: "Send one notification now — independent of the toggle above."
@@ -5208,7 +5418,7 @@ Panel {
               implicitHeight: syncContent.implicitHeight + Style.space(28)
               color: root.alpha(root.foreground, 0.035)
               borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-              radius: Style.cornerRadius
+              radius: root.cardRadius
 
               Column {
                 id: syncContent
@@ -5258,7 +5468,7 @@ Panel {
                   Rectangle {
                     width: parent.width
                     height: Style.space(32)
-                    radius: Style.cornerRadius
+                    radius: root.controlRadius
                     color: root.alpha(root.foreground, 0.06)
                     border.width: 1
                     border.color: syncDirInput.activeFocus ? Commons.Color.accent : root.alpha(root.foreground, 0.2)
@@ -5366,7 +5576,7 @@ Panel {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         height: Style.space(46)
-        radius: Style.cornerRadius + Style.space(2)
+        radius: root.cardRadius
         color: root.mix(root.surface, Commons.Color.accent, 0.10)
         border.width: 1
         border.color: root.alpha(Commons.Color.accent, 0.45)
@@ -5402,6 +5612,8 @@ Panel {
           spacing: Style.space(6)
 
           Button {
+
+            radius: root.controlRadius
             text: "Discard"
             bordered: true
             foreground: root.foreground
@@ -5416,6 +5628,8 @@ Panel {
           }
 
           Button {
+
+            radius: root.controlRadius
             text: "Save"
             enabled: saveBar.valid
             selected: true
@@ -5440,6 +5654,7 @@ Panel {
 
   component LaunchAccountButton: Button {
     id: launchAccount
+    radius: root.controlRadius
     required property string providerBrand
     required property string accountId
 
@@ -5536,6 +5751,8 @@ Panel {
     }
 
     ToggleSwitch {
+
+      rounded: true
       id: settingToggleSwitch
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
@@ -5556,7 +5773,7 @@ Panel {
 
     implicitHeight: Style.space(28)
     height: implicitHeight
-    radius: Style.cornerRadius
+    radius: root.controlRadius
     color: root.alpha(root.foreground, 0.05)
     border.width: 1
     border.color: root.alpha(root.foreground, 0.12)
@@ -5576,7 +5793,7 @@ Panel {
           width: (segmented.width - Style.space(4) - Style.space(2) * Math.max(0, segmented.options.length - 1))
             / Math.max(1, segmented.options.length)
           height: parent.height
-          radius: Math.max(0, Style.cornerRadius - Style.space(1))
+          radius: root.controlRadius - Style.space(2)
           color: chosen ? root.alpha(Commons.Color.accent, 0.22)
             : (segmentHover.containsMouse && segmented.enabled ? root.alpha(root.foreground, 0.07) : "transparent")
           border.width: chosen ? 1 : 0
@@ -5615,29 +5832,31 @@ Panel {
     }
   }
 
-  // One limit window as a ring, with what the bar cannot show underneath:
-  // the reset as a countdown and as a clock time, and how the window is
-  // pacing. `creditMode` draws a prepaid balance's credit left instead.
+  // One limit window as a ring in its own tint, with the reset as a pill
+  // underneath: countdown and wall-clock time, the fact the bar can't show.
+  // `creditMode` draws a prepaid balance's credit left instead.
   component RingTile: Item {
     id: ringTile
     property var window: null
     property bool creditMode: false
+    property color tint: Commons.Color.accent
     readonly property var pace: creditMode ? null : root.paceFor(window)
     readonly property bool stale: !creditMode && root.windowIsStale(window)
     readonly property bool hasValue: creditMode ? (!!root.balance && root.balance.funded > 0) : (!!window && window.percent >= 0)
     readonly property real ringValue: creditMode
       ? (hasValue ? root.clamp(root.balance.remaining / root.balance.funded, 0, 1) : 0)
       : (hasValue ? root.displayPercent(window.percent) : 0)
-    readonly property string severity: creditMode ? root.balanceSeverity
-      : (stale || !hasValue ? "ok" : root.severityForPercent(window.percent))
+    readonly property color ringColor: creditMode ? root.colorForSeverity(root.balanceSeverity) === root.foreground
+      ? Commons.Color.accent : root.colorForSeverity(root.balanceSeverity) : tint
     readonly property real resetMs: creditMode ? -1 : root.resetMsFor(window)
+    readonly property var resetParts: root.momentParts(resetMs > 0 ? root.nowMs + resetMs : NaN)
 
     implicitHeight: ringTileColumn.implicitHeight
 
     Column {
       id: ringTileColumn
       width: parent.width
-      spacing: Style.space(4)
+      spacing: Style.space(6)
 
       Item {
         width: parent.width
@@ -5650,9 +5869,9 @@ Panel {
           height: parent.height
           value: ringTile.ringValue
           marker: ringTile.pace ? root.displayPercent(ringTile.pace.elapsed) : -1
-          color: root.colorForSeverity(ringTile.severity)
+          color: ringTile.ringColor
           thickness: Style.space(9)
-          opacity: ringTile.stale ? 0.55 : 1.0
+          opacity: ringTile.stale ? 0.5 : 1.0
         }
 
         Column {
@@ -5664,7 +5883,7 @@ Panel {
             text: !ringTile.hasValue ? "—"
               : (ringTile.creditMode ? Math.round(ringTile.ringValue * 100) + "%"
                 : Format.formatPercent(ringTile.window.percent, usage.showAvailablePercentage))
-            color: ringTile.severity === "ok" ? root.foreground : root.textFor(root.colorForSeverity(ringTile.severity))
+            color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Math.round(Style.font.display * 0.95)
             font.bold: true
@@ -5680,69 +5899,218 @@ Panel {
         }
       }
 
-      Text {
-        width: parent.width
-        horizontalAlignment: Text.AlignHCenter
-        text: ringTile.creditMode ? "Prepaid credit" : (ringTile.window ? String(ringTile.window.title || "Limit") : "")
-        textFormat: Text.PlainText
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        font.bold: true
-        font.capitalization: Font.AllUppercase
-        font.letterSpacing: 0.8
-        elide: Text.ElideRight
-      }
-
-      // The reset, as large as the percentage it gives back.
       Row {
         anchors.horizontalCenter: parent.horizontalCenter
+        spacing: Style.space(6)
+
+        Rectangle {
+          anchors.verticalCenter: parent.verticalCenter
+          width: Style.space(7)
+          height: width
+          radius: width / 2
+          color: ringTile.ringColor
+        }
+
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: ringTile.creditMode ? "Prepaid credit" : (ringTile.window ? String(ringTile.window.title || "Limit") : "")
+          textFormat: Text.PlainText
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          font.capitalization: Font.AllUppercase
+          font.letterSpacing: 0.8
+          elide: Text.ElideRight
+          width: Math.min(implicitWidth, ringTile.width - Style.space(14))
+        }
+      }
+
+      // The reset, as large as the percentage it hands back.
+      Rectangle {
+        anchors.horizontalCenter: parent.horizontalCenter
         visible: !ringTile.creditMode
-        spacing: Style.space(5)
+        width: Math.min(ringTile.width, resetPillRow.implicitWidth + Style.space(18))
+        height: resetPillRow.implicitHeight + Style.space(10)
+        radius: height / 2
+        color: root.alpha(ringTile.ringColor, 0.14)
+        border.width: 1
+        border.color: root.alpha(ringTile.ringColor, 0.40)
+
+        Row {
+          id: resetPillRow
+          anchors.centerIn: parent
+          spacing: Style.space(5)
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: "󰦛"
+            color: root.textFor(ringTile.ringColor)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: ringTile.stale ? "Reset" : (ringTile.resetMs > 0 ? root.formatDuration(ringTile.resetMs) : "No reset")
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.subtitle
+            font.bold: true
+          }
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            visible: text !== ""
+            text: ringTile.stale ? "refreshing"
+              : (ringTile.resetParts.day !== "" ? ringTile.resetParts.day + " " + ringTile.resetParts.clock : "")
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+      }
+    }
+  }
+
+  // A window drawn as time, from its start to its reset: the part already
+  // behind you, where now is, where it empties at this rate, and the stretch
+  // it would leave you blocked before the reset hands it back.
+  component ForecastLane: Item {
+    id: lane
+    property var window: null
+    property color tint: Commons.Color.accent
+    readonly property var pace: root.paceFor(window)
+    readonly property real spanMs: window ? Insights.windowSpanMs(window) : 0
+    readonly property real resetMs: root.resetMsFor(window)
+    readonly property bool full: !!window && window.percent >= 1
+    readonly property bool stale: root.windowIsStale(window)
+    readonly property bool hasTimeline: !stale && spanMs > 0 && resetMs > 0 && resetMs <= spanMs
+    readonly property real nowFrac: hasTimeline ? root.clamp(1 - resetMs / spanMs, 0, 1) : 0
+    readonly property bool runsOut: !full && !!pace && pace.runsOutInMs >= 0
+    readonly property real outFrac: runsOut ? root.clamp(nowFrac + pace.runsOutInMs / spanMs, nowFrac, 1) : -1
+    readonly property color outcomeColor: full ? root.urgent : (runsOut ? root.warn : tint)
+
+    implicitHeight: laneColumn.implicitHeight
+
+    Column {
+      id: laneColumn
+      width: parent.width
+      spacing: Style.space(6)
+
+      Item {
+        width: parent.width
+        implicitHeight: Math.max(laneTitle.implicitHeight, laneOutcome.implicitHeight)
 
         Text {
+          id: laneTitle
+          anchors.left: parent.left
           anchors.verticalCenter: parent.verticalCenter
-          text: "󰑓"
-          color: root.accentText
+          text: lane.window ? String(lane.window.title || "Limit") : ""
+          textFormat: Text.PlainText
+          color: root.foreground
           font.family: root.fontFamily
-          font.pixelSize: Style.font.body
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
         }
 
         Text {
+          id: laneOutcome
+          anchors.right: parent.right
+          anchors.left: laneTitle.right
+          anchors.leftMargin: Style.space(10)
           anchors.verticalCenter: parent.verticalCenter
-          text: ringTile.stale ? "Reset" : (ringTile.resetMs > 0 ? root.formatDuration(ringTile.resetMs) : "No reset time")
-          color: ringTile.resetMs > 0 || ringTile.stale ? root.foreground : root.dim
+          horizontalAlignment: Text.AlignRight
+          elide: Text.ElideLeft
+          text: {
+            if (!lane.window) return ""
+            if (lane.stale) return "Reset passed · updates on the next refresh"
+            if (lane.full) return lane.resetMs > 0 ? "Empty now · back " + root.resetClock(lane.window) : "Empty now"
+            if (lane.runsOut) {
+              var at = root.momentParts(root.nowMs + lane.pace.runsOutInMs)
+              return "Empties " + (at.day === "today" ? "" : at.day + " ") + at.clock + " · "
+                + root.formatDuration(Math.max(0, lane.resetMs - lane.pace.runsOutInMs)) + " before reset"
+            }
+            if (lane.pace && lane.pace.status !== "idle")
+              return "Lasts to reset · ~" + Math.min(99, Math.round(lane.pace.projected * 100)) + "% used by then"
+            return lane.resetMs > 0 ? "Resets " + root.resetClock(lane.window) : "No reset time reported"
+          }
+          textFormat: Text.PlainText
+          color: lane.full ? root.textFor(root.urgent) : (lane.runsOut ? root.warnText : root.dim)
           font.family: root.fontFamily
-          font.pixelSize: ringTile.resetMs > 0 ? Math.round(Style.font.subtitle * 1.15) : Style.font.bodySmall
-          font.bold: ringTile.resetMs > 0
+          font.pixelSize: Style.font.caption
+          font.bold: lane.full || lane.runsOut
         }
       }
 
-      Text {
+      Item {
+        visible: lane.hasTimeline
         width: parent.width
-        horizontalAlignment: Text.AlignHCenter
-        visible: text !== ""
-        // (Credit: the verdict beside the ring already states the amounts.)
-        text: ringTile.creditMode ? ""
-          : (ringTile.stale ? "updates on the next refresh"
-            : (ringTile.resetMs > 0 ? "resets " + root.resetClock(ringTile.window) : ""))
-        textFormat: Text.PlainText
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        elide: Text.ElideRight
-      }
+        height: Style.space(10)
 
-      Text {
-        width: parent.width
-        horizontalAlignment: Text.AlignHCenter
-        visible: text !== ""
-        text: root.paceText(ringTile.pace)
-        textFormat: Text.PlainText
-        color: root.paceColor(ringTile.pace)
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        elide: Text.ElideRight
+        Rectangle {
+          id: laneTrack
+          anchors.fill: parent
+          radius: height / 2
+          color: root.track
+        }
+
+        // Time already behind you in this window.
+        Rectangle {
+          anchors.left: laneTrack.left
+          anchors.verticalCenter: laneTrack.verticalCenter
+          width: laneTrack.width * lane.nowFrac
+          height: laneTrack.height
+          radius: height / 2
+          gradient: Gradient {
+            orientation: Gradient.Horizontal
+            GradientStop { position: 0; color: root.alpha(lane.tint, 0.25) }
+            GradientStop { position: 1; color: root.alpha(lane.tint, 0.75) }
+          }
+        }
+
+        // The stretch with nothing left: from the projected run-out (or
+        // now, when already empty) to the reset.
+        Rectangle {
+          visible: lane.full || lane.runsOut
+          x: laneTrack.width * (lane.full ? lane.nowFrac : lane.outFrac)
+          anchors.verticalCenter: laneTrack.verticalCenter
+          width: Math.max(2, laneTrack.width - x)
+          height: laneTrack.height
+          radius: height / 2
+          color: root.alpha(lane.outcomeColor, 0.55)
+        }
+
+        // Now.
+        Rectangle {
+          x: Math.round(laneTrack.width * lane.nowFrac) - width / 2
+          anchors.verticalCenter: laneTrack.verticalCenter
+          width: Math.max(5, Style.space(5))
+          height: laneTrack.height + Style.space(8)
+          radius: width / 2
+          color: root.surface
+
+          Rectangle {
+            anchors.centerIn: parent
+            width: Math.max(3, Style.space(3))
+            height: parent.height - 2
+            radius: width / 2
+            color: root.foreground
+          }
+        }
+
+        // Where it empties at this rate.
+        Rectangle {
+          visible: lane.runsOut
+          x: Math.round(laneTrack.width * lane.outFrac) - width / 2
+          anchors.verticalCenter: laneTrack.verticalCenter
+          width: Style.space(12)
+          height: width
+          radius: width / 2
+          color: lane.outcomeColor
+          border.width: 2
+          border.color: root.surface
+        }
       }
     }
   }
@@ -5777,7 +6145,7 @@ Panel {
     }
 
     height: Style.space(34)
-    radius: Style.cornerRadius + Style.space(2)
+    radius: root.cardRadius
     color: root.alpha(root.foreground, 0.05)
     border.width: 1
     border.color: root.alpha(root.foreground, 0.10)
@@ -5796,7 +6164,7 @@ Panel {
           readonly property bool chosen: tabStrip.current === modelData.id
           width: tabStrip.cellWidth
           height: parent.height
-          radius: Style.cornerRadius
+          radius: root.controlRadius
           color: chosen ? root.alpha(Commons.Color.accent, 0.18)
             : (tabCellHover.containsMouse ? root.alpha(root.foreground, 0.06) : "transparent")
           border.width: chosen ? 1 : 0
@@ -6002,7 +6370,7 @@ Panel {
     implicitHeight: tileContent.implicitHeight + Style.space(20)
     color: root.alpha(root.foreground, 0.035)
     borderSpec: Border.flat(root.alpha(root.foreground, 0.10), 1)
-    radius: Style.cornerRadius
+    radius: root.cardRadius
 
     Column {
       id: tileContent
@@ -6309,7 +6677,7 @@ Panel {
 
     Rectangle {
       anchors.fill: parent
-      radius: Style.cornerRadius
+      radius: root.controlRadius
       color: root.alpha(root.foreground, 0.05)
     }
 
@@ -6318,7 +6686,7 @@ Panel {
       anchors.top: parent.top
       anchors.bottom: parent.bottom
       width: parent.width * root.clamp(modelRow.share, 0, 1)
-      radius: Style.cornerRadius
+      radius: root.controlRadius
       color: root.alpha(root.foreground, 0.14)
 
       Behavior on width {
