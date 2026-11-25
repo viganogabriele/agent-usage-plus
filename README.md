@@ -11,11 +11,14 @@ Native Omarchy bar widget for AI coding usage, limits, balances, pace, costs
 and history. It reads Omarchy and local collector records, so it works with
 subscriptions and API accounts without storing credentials.
 
-The panel opens on a dashboard: a gauge for whichever limit will stop you
-first, whether you are ahead of or behind the window's clock and when you
-would run out at this rate, today's tokens against your 7-day average, and
-your usage streak. Details add an activity calendar, token mix with cache
-hit share, the token trend, per-model usage and the API-rate equivalent.
+The panel opens on a dashboard: Session and Weekly rings with each window's
+reset as a countdown and a clock time, whether you are ahead of or behind the
+window's clock and when you would run out at this rate, and one sentence on
+what that means. Below it, four views: **Usage** (today's tokens against your
+7-day average, streak, other limits, accounts), **Activity** (calendar
+heatmap and token trend), **Models** (token mix and cache hit share,
+per-model use) and **Cost** (API-rate equivalent and every provider side by
+side).
 
 Forked from the MIT-licensed `omarchy.agents` widget bundled with Omarchy and
 expanded into a standalone plugin.

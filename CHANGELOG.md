@@ -7,10 +7,15 @@ All notable changes to this project are documented in this file. The format is b
 ### Added
 
 - Redesigned panel dashboard (the bar is unchanged, pixel for pixel):
-  - An overview card with a gauge for the fullest limit window (or prepaid
-    credit), a dot for how much of the window has elapsed, and a plain verdict
-    — *Plenty of room*, *On pace*, *Running hot*, *Almost out*, *Limit
-    reached* — with run-out and reset times.
+  - An overview with Session and Weekly side by side as rings (or the two
+    fullest windows, or prepaid credit), each with its reset as a countdown
+    and a wall-clock time, a dot for how much of the window has elapsed, and
+    its pace; underneath, a verdict naming the window it is about — *Plenty
+    of room*, *On pace*, *Running hot*, *Almost out*, *Limit reached* — with
+    the run-out or the next reset.
+  - Four views under the overview — Usage, Activity, Models, Cost — instead
+    of one long Details scroll; `e` steps through them, and a view with
+    nothing to show says why.
   - Window pace on every allowance row: a clock tick on the meter and "12%
     ahead of pace" / "Out in 1h 20m at this rate". The projection is the
     window's own average rate and is withheld for the first 5% of a window and
@@ -20,13 +25,21 @@ All notable changes to this project are documented in this file. The format is b
   - Provider chips ringed with each account's fullest meter, plus a status dot
     for sign-in/endpoint problems, so the switcher doubles as an overview.
   - A hero with a plan pill, "Updated … ago", and a one-click refresh button.
-  - Details: a six-week activity calendar heatmap with recorded total, 7-day
-    average and week-over-week change; a token-mix bar with cache hit share;
-    a smoothed, area-filled token trend with a hover guide and tooltips.
+  - Activity: a five-week calendar heatmap with recorded total, 7-day
+    average and week-over-week change, and a smoothed, area-filled token
+    trend with a hover guide and tooltips. Models: a token-mix bar with cache
+    hit share and per-model use. Cost: the selected account's API-rate
+    estimate with average per day and a 30-day pace, then every provider in
+    two-line rows (mark, plan usage or credit, estimate and period) with a
+    total — nothing cut to "Partial · A…".
+  - Accounts of the selected provider as rows with a ring, reading, next
+    reset and Use/Active.
 - Redesigned Settings at the panel's own width (it used to jump to twice
-  the width): Providers / Display / Alerts / Sync tabs; a card per provider
-  with its plan or problem, an Enabled switch, Bar slot and Bar shows
-  segmented controls and a live preview built from the real bar parts;
+  the width): Providers / Accounts / Display / Alerts / Sync tabs; a compact
+  card per provider with its plan or problem, an Enabled switch, "In the bar"
+  and "Shows" segmented controls and a live preview built from the real bar
+  parts; an Accounts tab listing every login with its live reading and
+  Sign in / Use / Remove, then New login and Import existing logins;
   explained toggle rows; a threshold scale drawn from the values being
   edited; and a pinned save bar (Discard / Save, a dot on the tab holding
   the edit) that writes only the settings that changed.

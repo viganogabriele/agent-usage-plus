@@ -180,9 +180,9 @@
       {
         "key": "openInDetailedView",
         "type": "boolean",
-        "label": "Open in detailed view",
+        "label": "Open on Activity",
         "defaultValue": false,
-        "description": "Show detailed history and all-provider models whenever the panel opens."
+        "description": "Open the panel on the Activity view (calendar and token trend) instead of Usage."
       },
       {
         "key": "notificationsEnabled",

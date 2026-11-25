@@ -1,8 +1,8 @@
 # Multiple Claude and Codex accounts
 
-Open the widget's **Settings → Providers → Accounts** and choose Claude or Codex. To use
+Open the widget's **Settings → Accounts** and choose Claude or Codex. To use
 existing logins, enter one or more CLI home directories (one per line) and
-select **Import paths**. `~/` is supported. You can also enter a parent directory
+select **Import**. `~/` is supported. You can also enter a parent directory
 such as `~/.codex-t3/`: its immediate account directories, for example
 `personal` and `polinetwork`, are imported separately. Reimporting the same
 directory does not add another account. Discovery inspects filenames only.
@@ -11,7 +11,7 @@ For a new login, enter a recognizable name and select **Add**, then use
 **Sign in** on its row to complete the provider's normal browser login.
 Back in the usage panel, open Claude
 or Codex to compare the accounts' current limits; select a row to see its full
-windows and reset times. Select **Use** in the comparison card or next to an
+windows and reset times. Select **Use** in the Usage view's accounts card or next to an
 account in Settings to show it in the bar. Account changes apply immediately.
 Right-clicking its bar mark starts a new CLI session with that account.
 

@@ -93,27 +93,29 @@ Panel {
 
   property bool cursorActive: false
 
-  // Each opening uses the saved preference; manual toggles are session-only.
+  // Each opening uses the saved preference; tab switches are session-only.
   //
-  // `expanded` (cross-provider data) and `settingsOpen` (the settings form)
-  // are mutually exclusive so the panel never has to grow to fit both at
-  // once — toggling one closes the other rather than stacking their content.
-  property bool expanded: false
+  // Under the overview the panel shows one view at a time — Usage, Activity,
+  // Models or Cost — instead of one long scroll where nothing said which
+  // card belonged to what. `expanded` means "a detail view is showing" and
+  // gates the heavier derived data. Settings replaces the views entirely.
+  readonly property var viewTabs: [
+    { id: "usage", label: "Usage", glyph: "󰓅" },
+    { id: "activity", label: "Activity", glyph: "󰸘" },
+    { id: "models", label: "Models", glyph: "󰘚" },
+    { id: "cost", label: "Cost", glyph: "󰄔" }
+  ]
+  property string viewTab: "usage"
+  readonly property bool expanded: viewTab !== "usage" && !settingsOpen
   property bool settingsOpen: false
-  property bool expandedBeforeSettings: false
+  // `e` steps through the views (and leaves Settings).
   function toggleExpanded() {
-    root.expanded = !root.expanded
-    if (root.expanded) root.settingsOpen = false
+    root.settingsOpen = false
+    var ids = root.viewTabs.map(function(t) { return t.id })
+    root.viewTab = ids[(ids.indexOf(root.viewTab) + 1) % ids.length]
   }
   function toggleSettings() {
-    if (root.settingsOpen) {
-      root.settingsOpen = false
-      root.expanded = root.expandedBeforeSettings
-    } else {
-      root.expandedBeforeSettings = root.expanded
-      root.expanded = false
-      root.settingsOpen = true
-    }
+    root.settingsOpen = !root.settingsOpen
   }
 
   // Countdowns and "updated" read this instead of Date.now() so the
@@ -121,6 +123,15 @@ Panel {
   property double nowMs: Date.now()
 
   readonly property var limits: limitWindows(provider)
+  // Windows the overview does not already draw as a ring (a model-scoped
+  // weekly, a credits window): the Usage view lists only these.
+  readonly property var otherLimits: limits.filter(function(w) {
+    for (var i = 0; i < root.ringWindows.length; i++) {
+      var ring = root.ringWindows[i]
+      if (ring.title === w.title && ring.resetAt === w.resetAt && ring.percent === w.percent) return false
+    }
+    return true
+  })
   readonly property var detailModels: expanded ? modelUsageRows(provider) : []
   readonly property var headline: bindingWindow(provider)
   readonly property var balance: provider ? (provider.balance || null) : null
@@ -167,9 +178,10 @@ Panel {
     if (live && String(live.usageStatusText || "") !== "") return String(live.usageStatusText)
     var brand = row.brand || row.providerId
     var inactive = (brand === "claude" || brand === "codex") && usage.activeAccountId(brand) !== row.providerId
-    var place = inactive ? "Inactive bar account"
-      : (row.barRole === "fixed" ? "Always in the bar"
-        : (row.barRole === "cycle" ? "Rotates through the bar" : "Panel only"))
+    // Short enough to sit beside the bar preview without being cut.
+    var place = inactive ? "Not the active account"
+      : (row.barRole === "fixed" ? "In the bar"
+        : (row.barRole === "cycle" ? "Rotating" : "Panel only"))
     var plan = live && String(live.tierLabel || "") !== "" ? String(live.tierLabel) + " · " : ""
     return plan + place
   }
@@ -293,14 +305,72 @@ Panel {
     }
     var w = root.overviewWindow
     if (!w) return ""
-    if (root.windowIsStale(w)) return "Last reading " + Format.formatPercent(w.percent, usage.showAvailablePercentage) + " · updates on the next refresh"
-    var parts = []
+    var title = String(w.title || "Limit")
+    if (root.windowIsStale(w)) return title + " last read " + Format.formatPercent(w.percent, usage.showAvailablePercentage) + " · updates on the next refresh"
     var pace = root.headlinePace
-    if (pace && pace.runsOutInMs >= 0 && w.percent < 1)
-      parts.push("Out in " + root.formatDuration(pace.runsOutInMs))
     var resetMs = root.resetMsFor(w)
-    if (resetMs > 0) parts.push((w.percent >= 1 ? "Back in " : "Resets in ") + root.formatDuration(resetMs))
-    return parts.join(" · ")
+    var resetText = resetMs > 0 ? root.formatDuration(resetMs) : ""
+    if (w.percent >= 1)
+      return title + " is full" + (resetText ? " · back in " + resetText + " (" + root.resetClock(w) + ")" : "")
+    if (pace && pace.runsOutInMs >= 0 && resetMs > 0)
+      return title + " runs out in " + root.formatDuration(pace.runsOutInMs) + ", "
+        + root.formatDuration(Math.max(0, resetMs - pace.runsOutInMs)) + " before it resets"
+    // Nothing urgent: the most useful fact is when room comes back next.
+    var next = root.nextReset
+    return next ? "Next reset: " + String(next.title || "Limit") + " in " + root.formatDuration(root.resetMsFor(next))
+      + " (" + root.resetClock(next) + ")" : ""
+  }
+
+  // The windows the overview draws as rings: Session and Weekly when the
+  // account has both (the pair coding plans are judged by), otherwise up to
+  // the two fullest current windows, soonest reset first.
+  readonly property var ringWindows: {
+    var all = limitWindows(provider)
+    var current = all.filter(function(w) { return !root.windowIsStale(w) })
+    var pool = current.length > 0 ? current : all
+    var session = null
+    var weekly = null
+    for (var i = 0; i < pool.length; i++) {
+      if (!session && pool[i].title === "Session") session = pool[i]
+      if (!weekly && pool[i].title === "Weekly") weekly = pool[i]
+    }
+    var picked = session && weekly ? [session, weekly]
+      : pool.slice().sort(function(a, b) { return b.percent - a.percent }).slice(0, 2)
+    return picked.sort(function(a, b) {
+      var ra = root.resetMsFor(a), rb = root.resetMsFor(b)
+      return (ra < 0 ? Infinity : ra) - (rb < 0 ? Infinity : rb)
+    })
+  }
+
+  // The current window that hands room back soonest.
+  readonly property var nextReset: {
+    var best = null
+    var windows = limitWindows(provider)
+    for (var i = 0; i < windows.length; i++) {
+      var ms = resetMsFor(windows[i])
+      if (ms > 0 && (!best || ms < resetMsFor(best))) best = windows[i]
+    }
+    return best
+  }
+
+  // The reset as a wall-clock moment, in the locale's own time format:
+  // "today 18:40", "tomorrow 09:00", "Fri 09:00", or a date further out.
+  function resetClock(w) {
+    var ms = w ? Date.parse(String(w.resetAt || "")) : NaN
+    if (!isFinite(ms)) return ""
+    var at = new Date(ms)
+    var now = new Date(root.nowMs)
+    // Some locales' short format still carries seconds; a reset is a
+    // minute-precision fact.
+    var format = String(Qt.locale().timeFormat(Locale.ShortFormat)).replace(/[:.]ss/, "").replace(/\s*t$/, "")
+    var time = Qt.formatTime(at, format)
+    var startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+    var dayOffset = Math.floor((new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime() - startOfToday) / 86400000 + 0.5)
+    if (dayOffset <= 0) return "today " + time
+    if (dayOffset === 1) return "tomorrow " + time
+    if (dayOffset < 7) return Qt.locale().dayName(at.getDay(), Locale.ShortFormat) + " " + time
+    return Qt.locale().dayName(at.getDay(), Locale.ShortFormat) + " " + at.getDate() + " "
+      + Qt.locale().monthName(at.getMonth(), Locale.ShortFormat)
   }
 
   // "Updated 4m ago" from the collector's own timestamp; blank when the
@@ -1026,7 +1096,7 @@ Panel {
   }
   onOpenedChanged: if (opened) {
     cursorActive = false
-    expanded = usage.openInDetailedView
+    viewTab = usage.openInDetailedView ? "activity" : "usage"
     settingsOpen = false
     nowMs = Date.now()
     if (panelFlick) panelFlick.contentY = 0
@@ -1822,7 +1892,7 @@ Panel {
         Column {
           id: column
           width: panelFlick.width
-          spacing: Style.space(18)
+          spacing: Style.space(14)
 
           // ---------- Hero: provider mark · name · plan · actions ----------
           // Always present: it holds the Settings gear, which must stay
@@ -2005,19 +2075,6 @@ Panel {
                 focusable: true
                 onClicked: root.toggleSettings()
               }
-
-              PanelActionButton {
-                visible: !root.settingsOpen && !!root.provider
-                iconText: root.expanded ? "󰅃" : "󰅀"
-                tooltipText: root.expanded ? "Hide details (e)" : "Show activity, trends and models (e)"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                size: Style.space(28)
-                fontSize: Style.font.body
-                bordered: true
-                focusable: true
-                onClicked: root.toggleExpanded()
-              }
             }
           }
 
@@ -2047,6 +2104,8 @@ Panel {
           // reliable while a Repeater model is being rebuilt during refresh.
           Grid {
             id: providerSwitch
+
+            HoverHandler { id: providerSwitchHover }
             visible: !root.settingsOpen && root.providers.length > 1
             width: parent.width
             spacing: Style.space(6)
@@ -2207,8 +2266,11 @@ Panel {
             }
           }
 
+          // Shown only while the pointer is over the marks, where it is
+          // actionable; the rest of the time it was noise between the
+          // switcher and the overview.
           Text {
-            visible: providerSwitch.visible
+            visible: providerSwitch.visible && providerSwitchHover.hovered
             width: parent.width
             text: root.providers.length + " providers · drag marks to reorder"
             color: root.dim
@@ -2299,161 +2361,184 @@ Panel {
               }
             }
 
-          // ---------- Overview: gauge + verdict ----------
-          // The one-second answer: how full is the window that will stop the
-          // next prompt, is it outrunning its own clock, and when does it
-          // come back. Everything below is the supporting detail.
+          // ---------- Overview: rings + verdict ----------
+          // The one-second answer, and the thing the bar cannot show: how
+          // full each window is, whether it is outrunning its own clock, and
+          // above all when it resets. Session and Weekly sit side by side;
+          // one sentence underneath says what to do about it.
           BorderSurface {
             id: overviewCard
             visible: !root.settingsOpen && !!root.provider && !!root.verdict
             width: parent.width
-            implicitHeight: overviewRow.implicitHeight + Style.space(28)
+            implicitHeight: overviewContent.implicitHeight + Style.space(28)
             color: root.alpha(root.foreground, 0.035)
             borderSpec: Border.flat(root.alpha(Commons.Color.accent, 0.22), 1)
             radius: Style.cornerRadius + Style.space(2)
 
-            readonly property bool hasWindow: !!root.overviewWindow && !root.overviewShowsBalance
-            readonly property real gaugeValue: hasWindow
-              ? root.displayPercent(root.overviewWindow.percent)
-              : (root.balance && root.balance.funded > 0 ? root.clamp(root.balance.remaining / root.balance.funded, 0, 1) : 0)
-            readonly property string gaugeSeverity: hasWindow
-              ? (root.windowIsStale(root.overviewWindow) ? "ok" : root.overviewSeverity)
-              : root.balanceSeverity
+            readonly property bool creditOnly: root.overviewShowsBalance && root.ringWindows.length === 0
+            readonly property int ringCount: creditOnly ? 1 : root.ringWindows.length
 
             Rectangle {
               anchors.fill: parent
               anchors.margins: 1
               radius: parent.radius
               gradient: Gradient {
-                orientation: Gradient.Horizontal
-                GradientStop { position: 0; color: root.alpha(Commons.Color.accent, 0.09) }
-                GradientStop { position: 0.6; color: root.alpha(Commons.Color.accent, 0.0) }
+                orientation: Gradient.Vertical
+                GradientStop { position: 0; color: root.alpha(Commons.Color.accent, 0.08) }
+                GradientStop { position: 0.7; color: root.alpha(Commons.Color.accent, 0.0) }
               }
             }
 
-            Row {
-              id: overviewRow
+            Column {
+              id: overviewContent
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
               anchors.leftMargin: Style.space(14)
               anchors.rightMargin: Style.space(14)
-              spacing: Style.space(16)
+              spacing: Style.space(14)
 
-              Item {
-                id: gaugeBox
-                width: Style.space(112)
-                height: width
+              // Two windows: a ring each, side by side.
+              Row {
+                visible: overviewCard.ringCount === 2
+                width: parent.width
+                spacing: Style.space(10)
 
-                RingGauge {
-                  anchors.fill: parent
-                  opacity: overviewCard.hasWindow && root.windowIsStale(root.overviewWindow) ? 0.6 : 1
-                  value: overviewCard.gaugeValue
-                  marker: overviewCard.hasWindow && root.headlinePace ? root.displayPercent(root.headlinePace.elapsed) : -1
-                  color: root.colorForSeverity(overviewCard.gaugeSeverity)
-                  thickness: Style.space(10)
-                }
+                Repeater {
+                  model: overviewCard.ringCount === 2 ? root.ringWindows : []
 
-                Column {
-                  anchors.centerIn: parent
-                  spacing: Style.space(1)
-
-                  Text {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    text: overviewCard.hasWindow
-                      ? Format.formatPercent(root.overviewWindow.percent, usage.showAvailablePercentage)
-                      : Math.round(overviewCard.gaugeValue * 100) + "%"
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Math.round(Style.font.display * 1.05)
-                    font.bold: true
-                  }
-
-                  Text {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    text: overviewCard.hasWindow
-                      ? (usage.showAvailablePercentage ? "left" : "used")
-                      : "credit left"
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
+                  RingTile {
+                    required property var modelData
+                    width: (overviewContent.width - Style.space(10)) / 2
+                    window: modelData
                   }
                 }
               }
 
-              Column {
-                width: overviewRow.width - gaugeBox.width - overviewRow.spacing
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.space(6)
+              // One window (or prepaid credit only): the ring with the
+              // verdict beside it instead of a lonely centered gauge.
+              Row {
+                visible: overviewCard.ringCount === 1
+                width: parent.width
+                spacing: Style.space(14)
 
-                Text {
-                  width: parent.width
-                  text: overviewCard.hasWindow ? String(root.overviewWindow.title || "Limit") : "Prepaid credit"
-                  textFormat: Text.PlainText
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.capitalization: Font.AllUppercase
-                  font.letterSpacing: 0.8
-                  elide: Text.ElideRight
+                RingTile {
+                  id: soloRing
+                  width: Style.space(150)
+                  window: overviewCard.creditOnly ? null : (root.ringWindows.length > 0 ? root.ringWindows[0] : null)
+                  creditMode: overviewCard.creditOnly
                 }
 
-                Text {
-                  width: parent.width
-                  text: root.verdict ? root.verdict.title : ""
-                  textFormat: Text.PlainText
-                  color: root.verdict ? root.verdict.color : root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Math.round(Style.font.subtitle * 1.35)
-                  font.bold: true
-                  elide: Text.ElideRight
-                }
-
-                Text {
-                  visible: text !== ""
-                  width: parent.width
-                  text: root.verdictDetail
-                  textFormat: Text.PlainText
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  wrapMode: Text.WordWrap
-                }
-
-                // Explains the dot on the gauge in the same breath.
-                Row {
-                  visible: overviewCard.hasWindow && !!root.headlinePace
+                Column {
+                  width: parent.width - soloRing.width - parent.spacing
+                  anchors.verticalCenter: parent.verticalCenter
                   spacing: Style.space(6)
 
-                  Rectangle {
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(7)
-                    height: width
-                    radius: width / 2
-                    color: root.foreground
+                  Text {
+                    width: parent.width
+                    text: root.verdict ? root.verdict.title : ""
+                    textFormat: Text.PlainText
+                    color: root.verdict ? root.verdict.color : root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Math.round(Style.font.subtitle * 1.35)
+                    font.bold: true
+                    wrapMode: Text.WordWrap
                   }
 
                   Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    // Same scale as the dot: in available mode the dot sits
-                    // at the share of the window still to come.
-                    text: !root.headlinePace ? ""
-                      : (usage.showAvailablePercentage
-                        ? Math.round((1 - root.headlinePace.elapsed) * 100) + "% of the window left"
-                        : Math.round(root.headlinePace.elapsed * 100) + "% of the window has passed")
-                    color: root.dim
+                    visible: text !== ""
+                    width: parent.width
+                    text: root.verdictDetail
+                    textFormat: Text.PlainText
+                    color: root.foreground
                     font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WordWrap
+                    lineHeight: 1.15
+                  }
+                }
+              }
+
+              // The verdict for two rings: a tinted strip naming the window
+              // it is about, so "Running hot" never floats unattributed.
+              Rectangle {
+                id: verdictStrip
+                visible: overviewCard.ringCount === 2
+                width: parent.width
+                height: verdictStripContent.implicitHeight + Style.space(16)
+                radius: Style.cornerRadius
+                color: root.alpha(root.verdict ? root.verdict.color : root.foreground, 0.10)
+                border.width: 1
+                border.color: root.alpha(root.verdict ? root.verdict.color : root.foreground, 0.25)
+
+                Row {
+                  id: verdictStripContent
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(10)
+                  anchors.rightMargin: Style.space(10)
+                  spacing: Style.space(8)
+
+                  Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(8)
+                    height: width
+                    radius: width / 2
+                    color: root.verdict ? root.verdict.color : root.foreground
+                  }
+
+                  Column {
+                    width: parent.width - Style.space(16)
+                    spacing: Style.space(2)
+
+                    Text {
+                      width: parent.width
+                      text: root.verdict ? root.verdict.title : ""
+                      textFormat: Text.PlainText
+                      color: root.verdict ? root.verdict.color : root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                      font.bold: true
+                    }
+
+                    Text {
+                      visible: text !== ""
+                      width: parent.width
+                      text: root.verdictDetail
+                      textFormat: Text.PlainText
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      wrapMode: Text.WordWrap
+                    }
                   }
                 }
               }
             }
           }
 
+          // ---------- View tabs ----------
+          // One view at a time under the overview, so every card below has
+          // an obvious home: Usage (limits, today, accounts), Activity
+          // (calendar and trend), Models (token mix and per-model use) and
+          // Cost (API-rate equivalent).
+          TabStrip {
+            id: viewTabStrip
+            visible: !root.settingsOpen && !!root.provider
+            width: parent.width
+            tabs: root.viewTabs
+            current: root.viewTab
+            onPicked: function(id) {
+              root.viewTab = id
+              if (panelFlick) panelFlick.contentY = 0
+            }
+          }
+
           // ---------- Today at a glance ----------
           Row {
             id: todayTiles
-            visible: !root.settingsOpen && !!root.provider && root.provider.hasLocalStats !== false
+            visible: root.viewTab === "usage" && !root.settingsOpen && !!root.provider && root.provider.hasLocalStats !== false
               && (root.hasActivity || todayTokens > 0 || root.provider.todayPrompts > 0 || root.provider.todaySessions > 0)
             width: parent.width
             spacing: Style.space(8)
@@ -2505,7 +2590,7 @@ Panel {
 
           BorderSurface {
             id: balanceSection
-            visible: !root.settingsOpen && !!root.balance
+            visible: root.viewTab === "usage" && !root.settingsOpen && !!root.balance
             width: parent.width
             implicitHeight: balanceContent.implicitHeight + Style.space(28)
             color: root.alpha(root.foreground, 0.035)
@@ -2581,7 +2666,7 @@ Panel {
 
           BorderSurface {
             id: limitsSection
-            visible: !root.settingsOpen && root.limits.length > 0
+            visible: root.viewTab === "usage" && !root.settingsOpen && root.otherLimits.length > 0
             width: parent.width
             implicitHeight: limitsContent.implicitHeight + Style.space(28)
             color: root.alpha(root.foreground, 0.035)
@@ -2600,12 +2685,12 @@ Panel {
               CardTitle {
                 width: parent.width
                 glyph: "󰓅"
-                text: "Allowance"
-                note: root.limits.length > 1 ? root.limits.length + " windows" : ""
+                text: root.ringWindows.length > 0 ? "Other limits" : "Allowance"
+                note: root.otherLimits.length > 1 ? root.otherLimits.length + " windows" : ""
               }
 
               Repeater {
-                model: root.limits
+                model: root.otherLimits
 
                 LimitRow {
                   required property var modelData
@@ -2616,8 +2701,13 @@ Panel {
             }
           }
 
+          // ---------- Accounts of this provider ----------
+          // Every login of the selected provider side by side: its fullest
+          // meter as a ring, its reading and next reset, and which one the
+          // bar uses. Selecting a row shows that account above.
           BorderSurface {
-            visible: (root.accountBrand === "claude" || root.accountBrand === "codex")
+            id: accountsCard
+            visible: root.viewTab === "usage" && (root.accountBrand === "claude" || root.accountBrand === "codex")
               && root.accountRows.length > 1 && !root.settingsOpen
             width: parent.width
             implicitHeight: accountComparison.implicitHeight + Style.space(28)
@@ -2632,42 +2722,172 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
               anchors.leftMargin: Style.space(14)
               anchors.rightMargin: Style.space(14)
-              spacing: Style.space(8)
+              spacing: Style.space(6)
 
               CardTitle {
                 width: parent.width
+                glyph: "󰀏"
                 text: root.accountBrand === "claude" ? "Claude accounts" : "Codex accounts"
+                note: root.accountRows.length + " logins"
               }
 
               Repeater {
                 model: root.accountRows
 
-                Row {
+                Rectangle {
                   id: accountRow
                   required property var modelData
+                  readonly property bool current: !!root.provider && root.provider.providerId === modelData.providerId
+                  readonly property var meter: root.chipMeter(modelData)
+                  readonly property var next: {
+                    var windows = root.limitWindows(modelData)
+                    var best = null
+                    for (var i = 0; i < windows.length; i++) {
+                      var ms = root.resetMsFor(windows[i])
+                      if (ms > 0 && (!best || ms < root.resetMsFor(best))) best = windows[i]
+                    }
+                    return best
+                  }
                   width: accountComparison.width
-                  spacing: Style.space(8)
+                  height: Style.space(48)
+                  radius: Style.cornerRadius
+                  color: current ? root.alpha(Commons.Color.accent, 0.10)
+                    : (accountRowHover.containsMouse ? root.alpha(root.foreground, 0.05) : "transparent")
+                  border.width: current ? 1 : 0
+                  border.color: root.alpha(Commons.Color.accent, 0.30)
 
-                  Button {
-                    width: parent.width - useAccountButton.width - parent.spacing
-                    text: accountRow.modelData.providerName + " · "
-                      + (accountRow.modelData.usageStatusText || root.providerPercentText(accountRow.modelData))
-                    tooltipText: "Show limits for " + accountRow.modelData.providerName
-                    selected: root.provider && root.provider.providerId === accountRow.modelData.providerId
-                    bordered: true
-                    foreground: root.foreground
-                    fontFamily: root.fontFamily
-                    fontSize: Style.font.bodySmall
+                  MouseArea {
+                    id: accountRowHover
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
                     onClicked: root.selectedProviderId = accountRow.modelData.providerId
+                  }
+
+                  Item {
+                    id: accountRowMark
+                    anchors.left: parent.left
+                    anchors.leftMargin: Style.space(6)
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(34)
+                    height: width
+
+                    ChipRing {
+                      anchors.fill: parent
+                      visible: !!accountRow.meter
+                      value: accountRow.meter ? accountRow.meter.value : -1
+                      color: root.colorForSeverity(accountRow.meter ? accountRow.meter.severity : "ok")
+                    }
+
+                    ProviderMark {
+                      anchors.centerIn: parent
+                      width: Style.space(16)
+                      height: width
+                      provider: accountRow.modelData
+                    }
+                  }
+
+                  Column {
+                    anchors.left: accountRowMark.right
+                    anchors.leftMargin: Style.space(10)
+                    anchors.right: useAccountButton.left
+                    anchors.rightMargin: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(2)
+
+                    Text {
+                      width: parent.width
+                      text: accountRow.modelData.providerName
+                      textFormat: Text.PlainText
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                      elide: Text.ElideRight
+                    }
+
+                    Text {
+                      width: parent.width
+                      text: String(accountRow.modelData.usageStatusText || "") !== ""
+                        ? String(accountRow.modelData.usageStatusText)
+                        : root.providerPercentText(accountRow.modelData)
+                          + (accountRow.next ? " · " + String(accountRow.next.title || "Limit").toLowerCase()
+                            + " resets in " + root.formatDuration(root.resetMsFor(accountRow.next)) : "")
+                      textFormat: Text.PlainText
+                      color: String(accountRow.modelData.usageStatusText || "") !== ""
+                        ? root.textFor(root.statusColor(accountRow.modelData)) : root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      elide: Text.ElideRight
+                    }
                   }
 
                   LaunchAccountButton {
                     id: useAccountButton
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.space(6)
+                    anchors.verticalCenter: parent.verticalCenter
                     providerBrand: root.accountBrand
                     accountId: accountRow.modelData.providerId
                     enabled: accountId === providerBrand || !!usage.accountProfiles[accountId]
                   }
                 }
+              }
+            }
+          }
+
+          // ---------- Empty view ----------
+          // A view with nothing to draw says why, instead of ending in a
+          // blank strip under the tabs.
+          BorderSurface {
+            id: emptyViewCard
+            readonly property bool viewEmpty: root.viewTab === "usage"
+              ? !(todayTiles.visible || balanceSection.visible || limitsSection.visible || accountsCard.visible)
+              : root.viewTab === "activity" ? !(activityCard.visible || historyCard.visible)
+              : root.viewTab === "models" ? !(tokenMixCard.visible || detailModelSection.visible)
+              : !costSection.visible
+            visible: !root.settingsOpen && !!root.provider && viewEmpty
+            width: parent.width
+            implicitHeight: emptyViewContent.implicitHeight + Style.space(32)
+            color: "transparent"
+            borderSpec: Border.flat(root.alpha(root.foreground, 0.14), 1)
+            radius: Style.cornerRadius
+
+            Column {
+              id: emptyViewContent
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(18)
+              anchors.rightMargin: Style.space(18)
+              spacing: Style.space(6)
+
+              Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: root.viewTab === "usage" ? "󰓅" : root.viewTab === "activity" ? "󰸘"
+                  : root.viewTab === "models" ? "󰘚" : "󰄔"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Math.round(Style.font.display * 0.9)
+              }
+
+              Text {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                text: {
+                  var name = root.provider ? root.provider.providerName : "This provider"
+                  var waiting = root.provider && String(root.provider.usageStatusText || "") !== ""
+                  if (root.viewTab === "usage")
+                    return waiting ? "Nothing to show until " + name + " reports again." : name + " reports no limits or usage for today."
+                  if (root.viewTab === "activity") return name + " doesn't report daily token history."
+                  if (root.viewTab === "models") return name + " doesn't report per-model token use."
+                  return "No plan usage or API-rate data to compare yet."
+                }
+                textFormat: Text.PlainText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
               }
             }
           }
@@ -2679,7 +2899,7 @@ Panel {
           // the collector's record is drawn hollow, never as a quiet zero.
           BorderSurface {
             id: activityCard
-            visible: root.expanded && !root.settingsOpen && root.hasActivity && !!root.heatmap
+            visible: root.viewTab === "activity" && !root.settingsOpen && root.hasActivity && !!root.heatmap
             width: parent.width
             implicitHeight: activityContent.implicitHeight + Style.space(28)
             color: root.alpha(root.foreground, 0.035)
@@ -2870,7 +3090,7 @@ Panel {
           // "billion-token" month is mostly cheap cache reads.
           BorderSurface {
             id: tokenMixCard
-            visible: root.expanded && !root.settingsOpen && !!root.tokenMixData && root.tokenMixData.total > 0
+            visible: root.viewTab === "models" && !root.settingsOpen && !!root.tokenMixData && root.tokenMixData.total > 0
             width: parent.width
             implicitHeight: tokenMixContent.implicitHeight + Style.space(28)
             color: root.alpha(root.foreground, 0.035)
@@ -2997,7 +3217,7 @@ Panel {
             // Nothing to plot for a provider that reports no daily history
             // at all (a billing-only collector); an empty "0 days" card was
             // just noise.
-            visible: root.expanded && !root.settingsOpen && !!root.provider
+            visible: root.viewTab === "activity" && !root.settingsOpen && !!root.provider
               && Array.isArray(root.provider.recentDays) && root.provider.recentDays.length > 0
             width: parent.width
             implicitHeight: historySection.implicitHeight + Style.space(28)
@@ -3262,7 +3482,7 @@ Panel {
           // provider's actual recorded token use and never repeats a cost.
           BorderSurface {
             id: detailModelSection
-            visible: root.expanded && root.detailModels.length > 0
+            visible: root.viewTab === "models" && !root.settingsOpen && root.detailModels.length > 0
             width: parent.width
             implicitHeight: detailModelContent.implicitHeight + Style.space(28)
             color: root.alpha(root.foreground, 0.035)
@@ -3325,211 +3545,16 @@ Panel {
           }
 
           // ---------- Plan vs API (Details only) ----------------------------
-          // Keep the accounting question in one place: what the provider says
-          // was used on the plan/credit ledger, and what the same local token
-          // usage would cost at published API rates. The second number is an
-          // equivalent, never an invoice or a subscription price.
+          // The Cost view answers two questions in order: what this account's
+          // recorded usage would cost at published API rates (an equivalent,
+          // never an invoice or a subscription price), then how every
+          // provider compares, with its real plan usage or credit beside it.
           Column {
             id: costSection
-            visible: root.expanded && !root.settingsOpen
+            visible: root.expanded && !root.settingsOpen && root.viewTab === "cost"
               && root.costProviderRows.length > 0
             width: parent.width
-            spacing: Style.space(10)
-
-            BorderSurface {
-              id: costProviderOverview
-              visible: root.costProviderRows.length > 0
-              width: parent.width
-              implicitHeight: providerOverviewContent.implicitHeight + Style.space(28)
-              color: root.alpha(root.foreground, 0.035)
-              borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-              radius: Style.cornerRadius
-
-              Column {
-                id: providerOverviewContent
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.leftMargin: Style.space(14)
-                anchors.rightMargin: Style.space(14)
-                spacing: Style.space(8)
-
-                CardTitle {
-                  width: parent.width
-                  glyph: "󰀏"
-                  text: "All providers"
-                }
-
-                Text {
-                  width: parent.width
-                  text: "Estimated at published API rates · periods vary by provider"
-                  textFormat: Text.PlainText
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
-                }
-
-                Item {
-                  width: parent.width
-                  implicitHeight: providerTableHeading.implicitHeight
-
-                  Text {
-                    id: providerTableHeading
-                    text: "PROVIDER"
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    font.bold: true
-                    anchors.left: parent.left
-                    anchors.verticalCenter: parent.verticalCenter
-                  }
-
-                  Text {
-                    text: "ON PLAN / CREDIT"
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    font.bold: true
-                    horizontalAlignment: Text.AlignRight
-                    anchors.right: providerApiColumn.left
-                    anchors.rightMargin: Style.space(10)
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(94)
-                  }
-
-                  Text {
-                    id: providerApiColumn
-                    text: "API EST."
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    font.bold: true
-                    horizontalAlignment: Text.AlignRight
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(78)
-                  }
-                }
-
-                Repeater {
-                  model: root.costProviderRows
-
-                  Item {
-                    id: providerCostRow
-                    required property var modelData
-                    width: providerOverviewContent.width
-                    height: Style.space(50)
-
-                    Rectangle {
-                      anchors.fill: parent
-                      radius: Style.cornerRadius
-                      color: root.provider && root.provider.providerId === providerCostRow.modelData.providerId
-                        ? root.alpha(Commons.Color.accent, 0.10) : "transparent"
-                    }
-
-                    Text {
-                      id: providerCostName
-                      text: String(providerCostRow.modelData.providerName || "Provider")
-                      textFormat: Text.PlainText
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                      font.bold: true
-                      elide: Text.ElideRight
-                      anchors.left: parent.left
-                      anchors.right: providerCostPlanValue.left
-                      anchors.rightMargin: Style.space(8)
-                      anchors.top: parent.top
-                      anchors.topMargin: Style.space(4)
-                    }
-
-                    Text {
-                      id: providerCostHint
-                      text: root.costPlanHint(providerCostRow.modelData)
-                      textFormat: Text.PlainText
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      elide: Text.ElideRight
-                      anchors.right: providerCostPlanValue.left
-                      anchors.rightMargin: Style.space(8)
-                      anchors.left: parent.left
-                      anchors.top: providerCostName.bottom
-                      anchors.topMargin: Style.space(1)
-                    }
-
-                    Text {
-                      id: providerCostPlanValue
-                      width: Style.space(94)
-                      text: root.costPlanValue(providerCostRow.modelData)
-                      textFormat: Text.PlainText
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                      font.bold: true
-                      horizontalAlignment: Text.AlignRight
-                      anchors.right: providerCostApiValue.left
-                      anchors.rightMargin: Style.space(10)
-                      anchors.top: parent.top
-                      anchors.topMargin: Style.space(4)
-                    }
-
-                    Text {
-                      id: providerCostApiValue
-                      width: Style.space(78)
-                      text: root.costApiValue(providerCostRow.modelData)
-                      textFormat: Text.PlainText
-                      color: providerCostRow.modelData.hasCost ? root.foreground : root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                      font.bold: providerCostRow.modelData.hasCost
-                      horizontalAlignment: Text.AlignRight
-                      anchors.right: parent.right
-                      anchors.top: parent.top
-                      anchors.topMargin: Style.space(4)
-                    }
-
-                    Text {
-                      width: providerCostApiValue.width
-                      text: !providerCostRow.modelData.hasCost ? "No estimate"
-                        : (providerCostRow.modelData.incomplete ? "Partial" : "Estimate")
-                          + (providerCostRow.modelData.period ? " · " + providerCostRow.modelData.period : "")
-                      textFormat: Text.PlainText
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      horizontalAlignment: Text.AlignRight
-                      elide: Text.ElideRight
-                      anchors.right: parent.right
-                      anchors.top: providerCostApiValue.bottom
-                      anchors.topMargin: Style.space(1)
-                    }
-
-                    Rectangle {
-                      id: providerUsageTrack
-                      visible: Number(providerCostRow.modelData.usagePercent) >= 0
-                      anchors.left: parent.left
-                      anchors.right: parent.right
-                      anchors.bottom: parent.bottom
-                      height: Math.max(Style.space(3), Math.round(Style.spacing.controlHeight * 0.10))
-                      radius: height / 2
-                      color: root.track
-                    }
-
-                    Rectangle {
-                      anchors.left: providerUsageTrack.left
-                      anchors.verticalCenter: providerUsageTrack.verticalCenter
-                      width: providerUsageTrack.width * root.clamp(Number(providerCostRow.modelData.usagePercent || 0), 0, 1)
-                      height: providerUsageTrack.height
-                      radius: providerUsageTrack.radius
-                      color: root.provider && root.provider.providerId === providerCostRow.modelData.providerId
-                        ? root.foreground : Commons.Color.accent
-                    }
-                  }
-                }
-              }
-            }
+            spacing: Style.space(12)
 
             BorderSurface {
               id: costValueCard
@@ -3556,25 +3581,31 @@ Panel {
                   note: root.cost && root.cost.period ? String(root.cost.period) : ""
                 }
 
-                Text {
+                Column {
+                  visible: !!root.cost
                   width: parent.width
-                  text: root.cost ? root.formatUsd(root.cost.estimateUsd) : "—"
-                  textFormat: Text.PlainText
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.display
-                  font.bold: true
-                  elide: Text.ElideRight
-                }
+                  spacing: Style.space(4)
 
-                Text {
-                  width: parent.width
-                  text: "Estimated at published API rates · not a bill"
-                  textFormat: Text.PlainText
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
+                  Text {
+                    width: parent.width
+                    text: root.cost ? root.formatUsd(root.cost.estimateUsd) : "—"
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.display
+                    font.bold: true
+                    elide: Text.ElideRight
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: "Estimated at published API rates · not a bill"
+                    textFormat: Text.PlainText
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
                 }
 
                 Text {
@@ -3582,34 +3613,47 @@ Panel {
                   visible: !!root.provider && (!root.cost || root.cost.incomplete)
                   width: parent.width
                   text: !root.cost
-                    ? "No priced token total for this provider yet."
+                    ? "No priced token total for this provider yet. Estimates come from collectors that record per-model tokens with a published API rate; the comparison below still shows every provider's plan usage."
                     : "Partial estimate · " + root.unpricedModelText(root.cost)
                   textFormat: Text.PlainText
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   wrapMode: Text.WordWrap
+                  lineHeight: 1.15
                 }
 
                 Row {
                   id: costMetrics
+                  visible: !!root.cost
                   width: parent.width
                   spacing: Style.space(10)
+                  readonly property real cellWidth: (width - spacing * 2) / 3
 
                   CostMetric {
-                    width: (costMetrics.width - costMetrics.spacing) / 2
-                    valueText: root.costPlanValue(root.costProviderRow(root.provider))
-                    label: root.costPlanLabel(root.costProviderRow(root.provider))
-                    hint: root.costPlanHint(root.costProviderRow(root.provider))
-                  }
-
-                  CostMetric {
-                    width: (costMetrics.width - costMetrics.spacing) / 2
+                    width: costMetrics.cellWidth
                     valueText: root.costSummary && root.costSummary.hasDailyAverage
                       ? root.formatUsd(root.costSummary.averageDailyUsd) : "—"
                     label: "Avg / day"
                     hint: root.costSummary && root.costSummary.hasDailyAverage
                       ? root.costSummary.averageDailyDays + " recorded days" : "No day count"
+                  }
+
+                  // What a month at the recorded daily average would come
+                  // to — the number to hold against a plan's price.
+                  CostMetric {
+                    width: costMetrics.cellWidth
+                    valueText: root.costSummary && root.costSummary.hasDailyAverage
+                      ? root.formatUsd(root.costSummary.averageDailyUsd * 30) : "—"
+                    label: "30-day pace"
+                    hint: "at that average"
+                  }
+
+                  CostMetric {
+                    width: costMetrics.cellWidth
+                    valueText: root.costPlanValue(root.costProviderRow(root.provider))
+                    label: root.costPlanLabel(root.costProviderRow(root.provider))
+                    hint: root.costPlanHint(root.costProviderRow(root.provider))
                   }
                 }
 
@@ -3617,39 +3661,44 @@ Panel {
                   id: costDailyBlock
                   visible: !!root.cost && root.costDailyRows.length > 0
                   width: parent.width
-                  spacing: Style.space(10)
+                  spacing: Style.space(8)
 
-                  PanelSectionHeader {
+                  Item {
                     width: parent.width
-                    text: "Daily API trend"
-                    foreground: root.foreground
-                    fontFamily: root.fontFamily
-                  }
+                    implicitHeight: costDailyTitle.implicitHeight
 
-                  Text {
-                    // Day count is dropped here: it's already stated by the
-                    // "Avg / recorded day" metric's hint above, so this line
-                    // only adds what that metric doesn't cover.
-                    visible: root.costDailyRows.length > 0
-                    width: parent.width
-                    text: root.costSummary
-                      ? root.formatUsd(root.costSummary.dailyTotalUsd)
-                        + (root.costSummary.dailySource === "reported" ? " reported" : " derived")
-                      : ""
-                    textFormat: Text.PlainText
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
+                    Text {
+                      id: costDailyTitle
+                      anchors.left: parent.left
+                      text: "By day"
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                    }
+
+                    Text {
+                      anchors.right: parent.right
+                      anchors.verticalCenter: costDailyTitle.verticalCenter
+                      text: root.costSummary
+                        ? root.formatUsd(root.costSummary.dailyTotalUsd)
+                          + (root.costSummary.dailySource === "reported" ? " reported" : " derived")
+                        : ""
+                      textFormat: Text.PlainText
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
                   }
 
                   Item {
                     id: costDailyChart
                     visible: root.costDailyRows.length > 0
                     width: parent.width
-                    height: Style.space(166)
+                    height: Style.space(150)
 
                     readonly property real axisLeft: Style.space(48)
-                    readonly property real axisRight: Style.space(8)
+                    readonly property real axisRight: Style.space(4)
                     readonly property real axisTop: Style.space(10)
                     readonly property real axisBottom: Style.space(24)
                     readonly property real plotWidth: Math.max(0, width - axisLeft - axisRight)
@@ -3683,7 +3732,7 @@ Panel {
                           x: costDailyChart.axisLeft
                           width: costDailyChart.plotWidth
                           height: 1
-                          color: root.alpha(root.foreground, 0.14)
+                          color: root.alpha(root.foreground, 0.12)
                         }
                       }
                     }
@@ -3701,7 +3750,7 @@ Panel {
                         y: costDailyChart.axisTop
 
                         Rectangle {
-                          width: Math.max(3, Math.min(parent.width * 0.66, parent.width - Style.space(4)))
+                          width: Math.max(3, Math.min(parent.width * 0.66, parent.width - Style.space(3)))
                           height: Number(costDayBar.modelData.usd || 0) > 0
                             ? Math.max(2, parent.height * Math.min(1,
                               Number(costDayBar.modelData.usd || 0) / Math.max(0.0001, costDailyChart.peak)))
@@ -3711,7 +3760,7 @@ Panel {
                           radius: Math.min(width / 2, Style.cornerRadius)
                           color: costDayBar.index === root.costDailyRows.length - 1
                             ? root.foreground : Commons.Color.accent
-                          opacity: costDayBar.index === root.costDailyRows.length - 1 ? 1.0 : 0.78
+                          opacity: costDayHover.containsMouse || costDayBar.index === root.costDailyRows.length - 1 ? 1.0 : 0.75
                         }
 
                         MouseArea {
@@ -3767,13 +3816,14 @@ Panel {
                   id: costModelChart
                   visible: root.costModelRows.length > 0
                   width: parent.width
-                  spacing: Style.space(10)
+                  spacing: Style.space(2)
 
-                  PanelSectionHeader {
-                    width: parent.width
-                    text: "API equivalent by model"
-                    foreground: root.foreground
-                    fontFamily: root.fontFamily
+                  Text {
+                    text: "By model"
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
                   }
 
                   Repeater {
@@ -3792,17 +3842,27 @@ Panel {
                         color: root.foreground
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.bodySmall
-                        font.bold: true
                         elide: Text.ElideRight
                         anchors.left: parent.left
-                        anchors.right: costModelValue.left
+                        anchors.right: costModelShare.left
                         anchors.rightMargin: Style.space(8)
                         anchors.verticalCenter: parent.verticalCenter
+                        anchors.verticalCenterOffset: -Style.space(3)
+                      }
+
+                      Text {
+                        id: costModelShare
+                        text: Math.round(root.clamp(Number(costModelRow.modelData.share || 0), 0, 1) * 100) + "%"
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        anchors.right: costModelValue.left
+                        anchors.rightMargin: Style.space(10)
+                        anchors.verticalCenter: costModelName.verticalCenter
                       }
 
                       Text {
                         id: costModelValue
-                        width: Style.space(78)
                         text: root.formatUsd(costModelRow.modelData.usd)
                         textFormat: Text.PlainText
                         color: root.foreground
@@ -3811,23 +3871,25 @@ Panel {
                         font.bold: true
                         horizontalAlignment: Text.AlignRight
                         anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.verticalCenter: costModelName.verticalCenter
                       }
 
                       Rectangle {
+                        id: costModelTrack
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.bottom: parent.bottom
-                        height: Math.max(Style.space(3), Math.round(Style.spacing.controlHeight * 0.10))
+                        anchors.bottomMargin: Style.space(6)
+                        height: Math.max(Style.space(4), Math.round(Style.spacing.controlHeight * 0.12))
                         radius: height / 2
                         color: root.track
                       }
 
                       Rectangle {
-                        anchors.left: parent.left
-                        anchors.bottom: parent.bottom
-                        width: parent.width * root.clamp(Number(costModelRow.modelData.share || 0), 0, 1)
-                        height: Math.max(Style.space(3), Math.round(Style.spacing.controlHeight * 0.10))
+                        anchors.left: costModelTrack.left
+                        anchors.verticalCenter: costModelTrack.verticalCenter
+                        width: costModelTrack.width * root.clamp(Number(costModelRow.modelData.share || 0), 0, 1)
+                        height: costModelTrack.height
                         radius: height / 2
                         color: Commons.Color.accent
 
@@ -3835,7 +3897,6 @@ Panel {
                           NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
                         }
                       }
-
                     }
                   }
                 }
@@ -3874,6 +3935,195 @@ Panel {
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
+                }
+              }
+            }
+
+            // Every provider in one list: its mark and name, its real plan
+            // usage or credit (with the meter), and its API-rate estimate.
+            // Two lines per provider and no fixed-width columns, so nothing
+            // has to be cut to "Partial · A…".
+            BorderSurface {
+              id: costProviderOverview
+              visible: root.costProviderRows.length > 0
+              width: parent.width
+              implicitHeight: providerOverviewContent.implicitHeight + Style.space(28)
+              color: root.alpha(root.foreground, 0.035)
+              borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+              radius: Style.cornerRadius
+
+              readonly property real totalUsd: {
+                var total = 0
+                for (var i = 0; i < root.costProviderRows.length; i++)
+                  if (root.costProviderRows[i].hasCost) total += Number(root.costProviderRows[i].estimateUsd) || 0
+                return total
+              }
+
+              Column {
+                id: providerOverviewContent
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(14)
+                anchors.rightMargin: Style.space(14)
+                spacing: Style.space(6)
+
+                CardTitle {
+                  width: parent.width
+                  glyph: "󰀏"
+                  text: "All providers"
+                  note: costProviderOverview.totalUsd > 0 ? root.formatUsd(costProviderOverview.totalUsd) + " at API rates" : ""
+                }
+
+                Text {
+                  width: parent.width
+                  bottomPadding: Style.space(4)
+                  text: "Plan usage or credit beside each provider's API-rate estimate. Estimate periods vary by provider."
+                  textFormat: Text.PlainText
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
+                }
+
+                Repeater {
+                  model: root.costProviderRows
+
+                  Rectangle {
+                    id: providerCostRow
+                    required property var modelData
+                    readonly property bool current: !!root.provider && root.provider.providerId === modelData.providerId
+                    readonly property var live: root.providerById(modelData.providerId)
+                    width: providerOverviewContent.width
+                    height: providerCostContent.implicitHeight + Style.space(16)
+                    radius: Style.cornerRadius
+                    color: current ? root.alpha(Commons.Color.accent, 0.10)
+                      : (providerCostHover.containsMouse ? root.alpha(root.foreground, 0.04) : "transparent")
+                    border.width: current ? 1 : 0
+                    border.color: root.alpha(Commons.Color.accent, 0.30)
+
+                    Column {
+                      id: providerCostContent
+                      anchors.left: parent.left
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.leftMargin: Style.space(8)
+                      anchors.rightMargin: Style.space(8)
+                      spacing: Style.space(5)
+
+                      Item {
+                        width: parent.width
+                        implicitHeight: Math.max(providerCostName.implicitHeight, providerCostApiValue.implicitHeight)
+
+                        ProviderMark {
+                          id: providerCostMark
+                          anchors.left: parent.left
+                          anchors.verticalCenter: parent.verticalCenter
+                          width: Style.space(16)
+                          height: width
+                          provider: providerCostRow.live || providerCostRow.modelData
+                        }
+
+                        Text {
+                          id: providerCostName
+                          text: String(providerCostRow.modelData.providerName || "Provider")
+                          textFormat: Text.PlainText
+                          color: root.foreground
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.bodySmall
+                          font.bold: true
+                          elide: Text.ElideRight
+                          anchors.left: providerCostMark.right
+                          anchors.leftMargin: Style.space(8)
+                          anchors.right: providerCostApiValue.left
+                          anchors.rightMargin: Style.space(8)
+                          anchors.verticalCenter: parent.verticalCenter
+                        }
+
+                        Text {
+                          id: providerCostApiValue
+                          text: root.costApiValue(providerCostRow.modelData)
+                          textFormat: Text.PlainText
+                          color: providerCostRow.modelData.hasCost ? root.foreground : root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.bodySmall
+                          font.bold: providerCostRow.modelData.hasCost
+                          anchors.right: parent.right
+                          anchors.verticalCenter: parent.verticalCenter
+                        }
+                      }
+
+                      Item {
+                        width: parent.width
+                        implicitHeight: Math.max(providerCostHint.implicitHeight, providerCostKind.implicitHeight)
+
+                        Text {
+                          id: providerCostHint
+                          text: {
+                            var row = providerCostRow.modelData
+                            var value = root.costPlanValue(row)
+                            var hint = root.costPlanHint(row)
+                            return value !== "—" ? value + " · " + hint : hint
+                          }
+                          textFormat: Text.PlainText
+                          color: root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                          elide: Text.ElideRight
+                          anchors.left: parent.left
+                          anchors.leftMargin: Style.space(24)
+                          anchors.right: providerCostKind.left
+                          anchors.rightMargin: Style.space(8)
+                          anchors.verticalCenter: parent.verticalCenter
+                        }
+
+                        Text {
+                          id: providerCostKind
+                          text: !providerCostRow.modelData.hasCost ? "no estimate"
+                            : (providerCostRow.modelData.incomplete ? "partial" : "estimate")
+                              + (providerCostRow.modelData.period ? " · " + providerCostRow.modelData.period : "")
+                          textFormat: Text.PlainText
+                          color: root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                          anchors.right: parent.right
+                          anchors.verticalCenter: parent.verticalCenter
+                        }
+                      }
+
+                      Item {
+                        visible: Number(providerCostRow.modelData.usagePercent) >= 0
+                        width: parent.width
+                        height: Math.max(Style.space(4), Math.round(Style.spacing.controlHeight * 0.12))
+
+                        Rectangle {
+                          id: providerUsageTrack
+                          anchors.fill: parent
+                          anchors.leftMargin: Style.space(24)
+                          radius: height / 2
+                          color: root.track
+                        }
+
+                        Rectangle {
+                          anchors.left: providerUsageTrack.left
+                          anchors.verticalCenter: providerUsageTrack.verticalCenter
+                          width: providerUsageTrack.width * root.clamp(Number(providerCostRow.modelData.usagePercent || 0), 0, 1)
+                          height: providerUsageTrack.height
+                          radius: providerUsageTrack.radius
+                          color: root.colorForSeverity(root.severityForPercent(Number(providerCostRow.modelData.usagePercent || 0)))
+                        }
+                      }
+                    }
+
+                    MouseArea {
+                      id: providerCostHover
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.selectedProviderId = providerCostRow.modelData.providerId
+                    }
+                  }
                 }
               }
             }
@@ -3902,92 +4152,28 @@ Panel {
             }
 
             // ----- Section tabs -----
-            Rectangle {
+            TabStrip {
               id: settingsTabs
               width: parent.width
-              height: Style.space(36)
-              radius: Style.cornerRadius + Style.space(2)
-              color: root.alpha(root.foreground, 0.05)
-              border.width: 1
-              border.color: root.alpha(root.foreground, 0.10)
-
-              readonly property var tabs: [
+              tabs: [
                 { id: "providers", label: "Providers", glyph: "󰨝" },
+                { id: "accounts", label: "Accounts", glyph: "󰀏" },
                 { id: "display", label: "Display", glyph: "󰸌" },
                 { id: "alerts", label: "Alerts", glyph: "󰂜" },
                 { id: "sync", label: "Sync", glyph: "󰓦" }
               ]
-
-              Row {
-                anchors.fill: parent
-                anchors.margins: Style.space(3)
-                spacing: Style.space(3)
-
-                Repeater {
-                  model: settingsTabs.tabs
-
-                  Rectangle {
-                    id: tabItem
-                    required property var modelData
-                    readonly property bool current: root.settingsTab === modelData.id
-                    width: (settingsTabs.width - Style.space(6) - Style.space(3) * (settingsTabs.tabs.length - 1))
-                      / settingsTabs.tabs.length
-                    height: parent.height
-                    radius: Style.cornerRadius
-                    color: current ? root.alpha(Commons.Color.accent, 0.18)
-                      : (tabHover.containsMouse ? root.alpha(root.foreground, 0.06) : "transparent")
-                    border.width: current ? 1 : 0
-                    border.color: root.alpha(Commons.Color.accent, 0.45)
-
-                    Behavior on color { ColorAnimation { duration: 120 } }
-
-                    Row {
-                      anchors.centerIn: parent
-                      spacing: Style.space(5)
-
-                      Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: tabItem.modelData.glyph
-                        color: tabItem.current ? root.accentText : root.dim
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.body
-                      }
-
-                      Text {
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: tabItem.modelData.label
-                        color: tabItem.current ? root.foreground : root.dim
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.bodySmall
-                        font.bold: tabItem.current
-                      }
-                    }
-
-                    // A dot on a tab that holds unsaved edits, so a draft
-                    // left on another tab is never invisible.
-                    Rectangle {
-                      visible: (tabItem.modelData.id === "providers" && settingsDraft.rotationDirty)
-                        || (tabItem.modelData.id === "display" && settingsDraft.refreshDirty)
-                        || (tabItem.modelData.id === "alerts" && settingsDraft.thresholdsDirty)
-                        || (tabItem.modelData.id === "sync" && syncContent.syncDirDirty)
-                      anchors.top: parent.top
-                      anchors.right: parent.right
-                      anchors.margins: Style.space(4)
-                      width: Style.space(6)
-                      height: width
-                      radius: width / 2
-                      color: root.warn
-                    }
-
-                    MouseArea {
-                      id: tabHover
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.settingsTab = tabItem.modelData.id
-                    }
-                  }
-                }
+              current: root.settingsTab
+              // A dot on a tab that holds unsaved edits, so a draft left on
+              // another tab is never invisible.
+              badges: ({
+                providers: settingsDraft.rotationDirty,
+                display: settingsDraft.refreshDirty,
+                alerts: settingsDraft.thresholdsDirty,
+                sync: syncContent.syncDirDirty
+              })
+              onPicked: function(id) {
+                root.settingsTab = id
+                if (panelFlick) panelFlick.contentY = 0
               }
             }
 
@@ -4005,245 +4191,18 @@ Panel {
               ]
               readonly property var labelModeOptions: [
                 { value: "icon", label: "Icon", tip: "Just the mark" },
-                { value: "iconPercent", label: "Icon + %", tip: "Mark and the percent" },
+                { value: "iconPercent", label: "Icon %", tip: "Mark and the percent" },
                 { value: "full", label: "Full", tip: "Mark, meter and percent" }
               ]
 
               Text {
                 width: parent.width
-                text: "Choose which subscriptions are collected and how they appear in the bar."
+                text: "Choose which subscriptions are collected and how each one sits in the bar. To change their order, drag the provider marks in the usage view."
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 wrapMode: Text.WordWrap
                 lineHeight: 1.15
-              }
-
-              BorderSurface {
-                id: accountSettings
-                width: parent.width
-                implicitHeight: accountSettingsContent.implicitHeight + Style.space(28)
-                color: root.alpha(root.foreground, 0.035)
-                borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-                radius: Style.cornerRadius
-
-                Column {
-                  id: accountSettingsContent
-                  anchors.fill: parent
-                  anchors.margins: Style.space(14)
-                  spacing: Style.space(10)
-                  property string newProvider: "codex"
-                  readonly property var accounts: {
-                    var profiles = usage.accountProfiles
-                    return Object.keys(profiles).sort().filter(id => profiles[id].provider === newProvider)
-                  }
-                  function addNewAccount() {
-                    if (usage.addAccount(newProvider, accountNameInput.text)) accountNameInput.text = ""
-                  }
-
-                  CardTitle {
-                    width: parent.width
-                    text: "Accounts"
-                  }
-
-                  Text {
-                    width: parent.width
-                    text: "Import or add CLI accounts to track their limits separately. Account changes apply immediately."
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    wrapMode: Text.WordWrap
-                  }
-
-                  Segmented {
-                    width: parent.width
-                    options: [{ value: "claude", label: "Claude" }, { value: "codex", label: "Codex" }]
-                    current: accountSettingsContent.newProvider
-                    onPicked: function(value) { accountSettingsContent.newProvider = value }
-                  }
-
-                  Rectangle {
-                    width: parent.width
-                    height: Style.space(78)
-                    radius: Style.cornerRadius
-                    color: root.alpha(root.foreground, 0.06)
-                    border.width: 1
-                    border.color: root.alpha(root.foreground, accountPathsInput.activeFocus ? 0.4 : 0.2)
-
-                    TextEdit {
-                      id: accountPathsInput
-                      anchors.fill: parent
-                      anchors.margins: Style.space(8)
-                      clip: true
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                      textFormat: TextEdit.PlainText
-                      wrapMode: TextEdit.WrapAnywhere
-                      selectByMouse: true
-
-                      Text {
-                        visible: accountPathsInput.text === "" && !accountPathsInput.activeFocus
-                        width: parent.width
-                        text: "Existing CLI account paths, one per line"
-                        wrapMode: Text.WordWrap
-                        color: root.dim
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.bodySmall
-                      }
-                    }
-                  }
-
-                  Button {
-                    text: usage.accountImportRunning ? "Importing…" : "Import paths"
-                    enabled: accountPathsInput.text.trim().length > 0 && !usage.accountImportRunning
-                    bordered: true
-                    foreground: root.foreground
-                    fontFamily: root.fontFamily
-                    fontSize: Style.font.caption
-                    onClicked: usage.importAccounts(accountSettingsContent.newProvider, accountPathsInput.text)
-                  }
-
-                  Text {
-                    width: parent.width
-                    visible: usage.accountImportStatus !== ""
-                    text: usage.accountImportStatus
-                    textFormat: Text.PlainText
-                    wrapMode: Text.WordWrap
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
-
-                  Row {
-                    width: parent.width
-                    spacing: Style.space(8)
-
-                    Rectangle {
-                      width: parent.width - addAccountButton.width - parent.spacing
-                      height: Style.space(32)
-                      radius: Style.cornerRadius
-                      color: root.alpha(root.foreground, 0.06)
-                      border.width: 1
-                      border.color: root.alpha(root.foreground, accountNameInput.activeFocus ? 0.4 : 0.2)
-
-                      TextInput {
-                        id: accountNameInput
-                        anchors.fill: parent
-                        anchors.leftMargin: Style.space(8)
-                        anchors.rightMargin: Style.space(8)
-                        verticalAlignment: TextInput.AlignVCenter
-                        clip: true
-                        color: root.foreground
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.bodySmall
-                        maximumLength: 80
-                        onAccepted: accountSettingsContent.addNewAccount()
-
-                        Text {
-                          visible: accountNameInput.text === "" && !accountNameInput.activeFocus
-                          anchors.verticalCenter: parent.verticalCenter
-                          text: "Account name, e.g. Work"
-                          color: root.dim
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.bodySmall
-                        }
-                      }
-                    }
-
-                    Button {
-                      id: addAccountButton
-                      text: "Add"
-                      enabled: accountNameInput.text.trim().length > 0
-                      selected: enabled
-                      bordered: true
-                      foreground: root.foreground
-                      fontFamily: root.fontFamily
-                      fontSize: Style.font.caption
-                      onClicked: accountSettingsContent.addNewAccount()
-                    }
-                  }
-
-                  Text {
-                    visible: accountSettingsContent.accounts.length > 0
-                    text: "Bar account"
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
-
-                  Repeater {
-                    model: accountSettingsContent.accounts.length > 0
-                      ? [accountSettingsContent.newProvider].concat(accountSettingsContent.accounts) : []
-
-                    Row {
-                      id: configuredAccountRow
-                      required property string modelData
-                      readonly property var profile: usage.accountProfiles[modelData]
-                      readonly property bool ready: !profile || root.accountRecordExists(modelData)
-                      width: accountSettingsContent.width
-                      spacing: Style.space(8)
-
-                      Column {
-                        width: Math.max(0, parent.width - launchAccountButton.width - parent.spacing
-                          - (configuredAccountRow.profile ? loginButton.width + removeButton.width + parent.spacing * 2 : 0))
-                        anchors.verticalCenter: parent.verticalCenter
-
-                        Text {
-                          width: parent.width
-                          text: configuredAccountRow.profile ? configuredAccountRow.profile.name : "Default account"
-                          textFormat: Text.PlainText
-                          color: root.foreground
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.bodySmall
-                          elide: Text.ElideRight
-                        }
-
-                        Text {
-                          visible: text !== ""
-                          width: parent.width
-                          text: configuredAccountRow.profile ? (configuredAccountRow.profile.path || "") : ""
-                          textFormat: Text.PlainText
-                          color: root.dim
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.caption
-                          elide: Text.ElideMiddle
-                        }
-                      }
-
-                      LaunchAccountButton {
-                        id: launchAccountButton
-                        providerBrand: accountSettingsContent.newProvider
-                        accountId: configuredAccountRow.modelData
-                        enabled: configuredAccountRow.ready
-                      }
-
-                      Button {
-                        id: loginButton
-                        visible: !!configuredAccountRow.profile
-                        text: enabled ? "Sign in" : "Preparing…"
-                        enabled: configuredAccountRow.ready
-                        bordered: true
-                        foreground: root.foreground
-                        fontFamily: root.fontFamily
-                        fontSize: Style.font.caption
-                        onClicked: root.loginToAccount(configuredAccountRow.modelData)
-                      }
-
-                      Button {
-                        id: removeButton
-                        visible: !!configuredAccountRow.profile
-                        text: "Remove"
-                        tooltipText: "Remove from the widget; keep the CLI login directory"
-                        bordered: true
-                        foreground: root.foreground
-                        fontFamily: root.fontFamily
-                        fontSize: Style.font.caption
-                        onClicked: usage.removeAccount(configuredAccountRow.modelData)
-                      }
-                    }
-                  }
-                }
               }
 
               Repeater {
@@ -4253,6 +4212,7 @@ Panel {
                   id: providerSettingsRow
                   required property var modelData
                   readonly property var liveProvider: root.providerById(modelData.providerId)
+                  readonly property bool inBar: modelData.enabled && modelData.barRole !== "off"
                   width: providerSettingsList.width
                   implicitHeight: providerCardContent.implicitHeight + Style.space(24)
                   color: root.alpha(root.foreground, modelData.enabled ? 0.045 : 0.02)
@@ -4267,21 +4227,21 @@ Panel {
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: Style.space(12)
                     anchors.rightMargin: Style.space(12)
-                    spacing: Style.space(10)
+                    spacing: Style.space(12)
 
                     Item {
                       width: parent.width
-                      implicitHeight: Math.max(Style.space(32), providerHeading.implicitHeight)
+                      implicitHeight: Math.max(Style.space(34), providerHeading.implicitHeight)
 
                       Rectangle {
                         id: providerMarkTile
                         anchors.left: parent.left
                         anchors.verticalCenter: parent.verticalCenter
-                        width: Style.space(32)
+                        width: Style.space(34)
                         height: width
                         radius: Style.cornerRadius
                         color: root.alpha(root.foreground, 0.06)
-                        opacity: providerSettingsRow.modelData.enabled ? 1.0 : 0.55
+                        opacity: providerSettingsRow.modelData.enabled ? 1.0 : 0.5
 
                         ProviderMark {
                           anchors.centerIn: parent
@@ -4295,7 +4255,7 @@ Panel {
                         id: providerHeading
                         anchors.left: providerMarkTile.right
                         anchors.leftMargin: Style.space(10)
-                        anchors.right: providerToggle.left
+                        anchors.right: barPreviewStrip.visible ? barPreviewStrip.left : providerToggle.left
                         anchors.rightMargin: Style.space(8)
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: Style.space(2)
@@ -4315,12 +4275,68 @@ Panel {
                           width: parent.width
                           text: root.providerSettingsSummary(providerSettingsRow.modelData, providerSettingsRow.liveProvider)
                           textFormat: Text.PlainText
-                          color: providerSettingsRow.liveProvider
+                          color: providerSettingsRow.modelData.enabled && providerSettingsRow.liveProvider
                             && String(providerSettingsRow.liveProvider.usageStatusText || "") !== ""
                             ? root.textFor(root.statusColor(providerSettingsRow.liveProvider)) : root.dim
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.caption
                           elide: Text.ElideRight
+                        }
+                      }
+
+                      // What the bar will draw for this provider, built from
+                      // the same parts as the real bar group.
+                      Rectangle {
+                        id: barPreviewStrip
+                        visible: providerSettingsRow.inBar
+                        anchors.right: providerToggle.left
+                        anchors.rightMargin: Style.space(10)
+                        anchors.verticalCenter: parent.verticalCenter
+                        height: Style.space(24)
+                        width: barPreviewRow.implicitWidth + Style.space(16)
+                        radius: Style.cornerRadius
+                        color: Commons.Color.bar.background
+                        border.width: 1
+                        border.color: root.alpha(root.foreground, 0.14)
+
+                        Row {
+                          id: barPreviewRow
+                          anchors.centerIn: parent
+                          spacing: Style.space(5)
+                          readonly property string mode: providerSettingsRow.modelData.labelMode
+                          readonly property var previewProvider: providerSettingsRow.liveProvider || providerSettingsRow.modelData
+
+                          ProviderMark {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: Style.space(16)
+                            height: width
+                            provider: barPreviewRow.previewProvider
+                            barMark: true
+                          }
+
+                          CheckpointMeter {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: Style.space(48)
+                            visible: barPreviewRow.mode === "full" && root.providerPercent(barPreviewRow.previewProvider) >= 0
+                            value: {
+                              var percent = root.providerPercent(barPreviewRow.previewProvider)
+                              return percent >= 0 ? root.displayPercent(percent) : -1
+                            }
+                            secondaryValue: {
+                              var percent = root.providerSecondaryPercent(barPreviewRow.previewProvider)
+                              return percent >= 0 ? root.displayPercent(percent) : -1
+                            }
+                            severity: root.providerWorstSeverity(barPreviewRow.previewProvider)
+                          }
+
+                          Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: barPreviewRow.mode !== "icon"
+                            text: root.providerPercentText(barPreviewRow.previewProvider)
+                            color: root.colorForSeverity(root.providerWorstSeverity(barPreviewRow.previewProvider))
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.caption
+                          }
                         }
                       }
 
@@ -4335,21 +4351,24 @@ Panel {
                       }
                     }
 
-                    // Bar placement only matters for a collected provider.
-                    Column {
+                    // Bar placement only matters for a collected provider:
+                    // where it sits, and how much of it the bar draws.
+                    Row {
                       visible: providerSettingsRow.modelData.enabled
                       width: parent.width
-                      spacing: Style.space(8)
+                      spacing: Style.space(10)
+                      readonly property real half: (width - spacing) / 2
 
-                      Rectangle {
-                        width: parent.width
-                        height: 1
-                        color: root.alpha(root.foreground, 0.08)
-                      }
+                      Column {
+                        width: parent.half
+                        spacing: Style.space(5)
 
-                      SettingLine {
-                        width: parent.width
-                        title: "Bar slot"
+                        Text {
+                          text: "In the bar"
+                          color: root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                        }
 
                         Segmented {
                           width: parent.width
@@ -4359,85 +4378,24 @@ Panel {
                         }
                       }
 
-                      SettingLine {
-                        width: parent.width
-                        title: "Bar shows"
-                        enabled: providerSettingsRow.modelData.barRole !== "off"
+                      Column {
+                        width: parent.half
+                        spacing: Style.space(5)
+                        enabled: providerSettingsRow.inBar
                         opacity: enabled ? 1.0 : 0.45
+
+                        Text {
+                          text: "Shows"
+                          color: root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                        }
 
                         Segmented {
                           width: parent.width
                           options: providerSettingsList.labelModeOptions
                           current: providerSettingsRow.modelData.labelMode
                           onPicked: function(value) { usage.setProviderLabelMode(providerSettingsRow.modelData.providerId, value) }
-                        }
-                      }
-
-                      // What the bar will draw for this provider, built from
-                      // the same parts as the real bar group.
-                      Item {
-                        visible: providerSettingsRow.modelData.barRole !== "off"
-                        width: parent.width
-                        implicitHeight: barPreviewStrip.height
-
-                        Text {
-                          anchors.left: parent.left
-                          anchors.verticalCenter: parent.verticalCenter
-                          text: "Preview"
-                          color: root.dim
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.caption
-                        }
-
-                        Rectangle {
-                          id: barPreviewStrip
-                          anchors.right: parent.right
-                          height: Style.space(26)
-                          width: barPreviewRow.implicitWidth + Style.space(20)
-                          radius: Style.cornerRadius
-                          color: Commons.Color.bar.background
-                          border.width: 1
-                          border.color: root.alpha(root.foreground, 0.12)
-
-                          Row {
-                            id: barPreviewRow
-                            anchors.centerIn: parent
-                            spacing: Style.space(5)
-                            readonly property string mode: providerSettingsRow.modelData.labelMode
-                            readonly property var previewProvider: providerSettingsRow.liveProvider || providerSettingsRow.modelData
-
-                            ProviderMark {
-                              anchors.verticalCenter: parent.verticalCenter
-                              width: Style.space(16)
-                              height: width
-                              provider: barPreviewRow.previewProvider
-                              barMark: true
-                            }
-
-                            CheckpointMeter {
-                              anchors.verticalCenter: parent.verticalCenter
-                              width: Style.space(48)
-                              visible: barPreviewRow.mode === "full" && root.providerPercent(barPreviewRow.previewProvider) >= 0
-                              value: {
-                                var percent = root.providerPercent(barPreviewRow.previewProvider)
-                                return percent >= 0 ? root.displayPercent(percent) : -1
-                              }
-                              secondaryValue: {
-                                var percent = root.providerSecondaryPercent(barPreviewRow.previewProvider)
-                                return percent >= 0 ? root.displayPercent(percent) : -1
-                              }
-                              severity: root.providerWorstSeverity(barPreviewRow.previewProvider)
-                            }
-
-                            Text {
-                              anchors.verticalCenter: parent.verticalCenter
-                              visible: barPreviewRow.mode !== "icon"
-                              text: root.providerPercentText(barPreviewRow.previewProvider)
-                              color: root.colorForSeverity(root.providerWorstSeverity(barPreviewRow.previewProvider))
-                              font.family: root.fontFamily
-                              font.pixelSize: Style.font.caption
-                            }
-                          }
                         }
                       }
                     }
@@ -4466,6 +4424,7 @@ Panel {
                   wrapMode: Text.WordWrap
                 }
               }
+
 
               // ----- Rotation -----
               BorderSurface {
@@ -4542,6 +4501,364 @@ Panel {
               }
             }
 
+            // ============================================ Accounts tab
+            // Several Claude or Codex logins side by side. The list comes
+            // first (what exists and which one the bar uses), then the two
+            // ways to add one: a fresh login, or importing existing CLI homes.
+            Column {
+              id: accountSettingsContent
+              visible: root.settingsTab === "accounts"
+              width: parent.width
+              spacing: Style.space(10)
+
+              property string newProvider: "claude"
+              readonly property string providerLabel: newProvider === "claude" ? "Claude" : "Codex"
+              readonly property var accounts: {
+                var profiles = usage.accountProfiles
+                return Object.keys(profiles).sort().filter(function(id) { return profiles[id].provider === accountSettingsContent.newProvider })
+              }
+              function addNewAccount() {
+                if (usage.addAccount(newProvider, accountNameInput.text)) accountNameInput.text = ""
+              }
+
+              Text {
+                width: parent.width
+                text: "Track several Claude or Codex logins side by side. The active account is the one the bar shows and right-click launches; changes apply immediately."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+                lineHeight: 1.15
+              }
+
+              Segmented {
+                width: parent.width
+                options: [{ value: "claude", label: "Claude" }, { value: "codex", label: "Codex" }]
+                current: accountSettingsContent.newProvider
+                onPicked: function(value) { accountSettingsContent.newProvider = value }
+              }
+
+              BorderSurface {
+                width: parent.width
+                implicitHeight: accountListContent.implicitHeight + Style.space(24)
+                color: root.alpha(root.foreground, 0.035)
+                borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+                radius: Style.cornerRadius
+
+                Column {
+                  id: accountListContent
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(12)
+                  anchors.rightMargin: Style.space(12)
+                  spacing: Style.space(6)
+
+                  CardTitle {
+                    width: parent.width
+                    glyph: "󰀏"
+                    text: accountSettingsContent.providerLabel + " accounts"
+                    note: (accountSettingsContent.accounts.length + 1) + " total"
+                  }
+
+                  Repeater {
+                    model: [accountSettingsContent.newProvider].concat(accountSettingsContent.accounts)
+
+                    Rectangle {
+                      id: configuredAccountRow
+                      required property string modelData
+                      readonly property var profile: usage.accountProfiles[modelData]
+                      readonly property bool ready: !profile || root.accountRecordExists(modelData)
+                      readonly property var live: root.providerById(modelData)
+                      readonly property bool active: usage.activeAccountId(accountSettingsContent.newProvider) === modelData
+                      width: accountListContent.width
+                      height: Math.max(accountRowText.implicitHeight, accountActions.implicitHeight) + Style.space(14)
+                      radius: Style.cornerRadius
+                      color: active ? root.alpha(Commons.Color.accent, 0.10) : root.alpha(root.foreground, 0.03)
+                      border.width: 1
+                      border.color: active ? root.alpha(Commons.Color.accent, 0.35) : root.alpha(root.foreground, 0.08)
+
+                      Column {
+                        id: accountRowText
+                        anchors.left: parent.left
+                        anchors.leftMargin: Style.space(10)
+                        anchors.right: accountActions.left
+                        anchors.rightMargin: Style.space(8)
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Style.space(2)
+
+                        Text {
+                          width: parent.width
+                          text: configuredAccountRow.profile ? configuredAccountRow.profile.name : "Default login"
+                          textFormat: Text.PlainText
+                          color: root.foreground
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.bodySmall
+                          font.bold: true
+                          elide: Text.ElideRight
+                        }
+
+                        // Its live state when it has a record, then where it
+                        // lives on disk.
+                        Text {
+                          width: parent.width
+                          text: {
+                            var live = configuredAccountRow.live
+                            if (!configuredAccountRow.ready) return "Preparing its record…"
+                            if (live && String(live.usageStatusText || "") !== "") return String(live.usageStatusText)
+                            if (live && root.providerPercent(live) >= 0) return root.providerPercentText(live) + " used"
+                              + (live.tierLabel ? " · " + live.tierLabel : "")
+                            return configuredAccountRow.profile ? "Waiting for its first reading" : "The login the CLI uses by default"
+                          }
+                          textFormat: Text.PlainText
+                          color: configuredAccountRow.live && String(configuredAccountRow.live.usageStatusText || "") !== ""
+                            ? root.textFor(root.statusColor(configuredAccountRow.live)) : root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                          elide: Text.ElideRight
+                        }
+
+                        Text {
+                          visible: text !== ""
+                          width: parent.width
+                          text: configuredAccountRow.profile ? (configuredAccountRow.profile.path || "") : ""
+                          textFormat: Text.PlainText
+                          color: root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                          elide: Text.ElideMiddle
+                        }
+                      }
+
+                      Row {
+                        id: accountActions
+                        anchors.right: parent.right
+                        anchors.rightMargin: Style.space(8)
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Style.space(6)
+
+                        Button {
+                          id: loginButton
+                          visible: !!configuredAccountRow.profile
+                          text: enabled ? "Sign in" : "Preparing…"
+                          tooltipText: "Open the provider's own browser login for this account"
+                          enabled: configuredAccountRow.ready
+                          bordered: true
+                          foreground: root.foreground
+                          fontFamily: root.fontFamily
+                          fontSize: Style.font.caption
+                          onClicked: root.loginToAccount(configuredAccountRow.modelData)
+                        }
+
+                        LaunchAccountButton {
+                          id: launchAccountButton
+                          providerBrand: accountSettingsContent.newProvider
+                          accountId: configuredAccountRow.modelData
+                          enabled: configuredAccountRow.ready
+                        }
+
+                        Button {
+                          id: removeButton
+                          visible: !!configuredAccountRow.profile
+                          width: Style.space(28)
+                          horizontalPadding: 0
+                          iconText: "󰩺"
+                          iconSize: Style.font.body
+                          tooltipText: "Remove from the widget; the CLI login directory stays on disk"
+                          bordered: true
+                          foreground: root.foreground
+                          fontFamily: root.fontFamily
+                          onClicked: usage.removeAccount(configuredAccountRow.modelData)
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+              BorderSurface {
+                width: parent.width
+                implicitHeight: addAccountContent.implicitHeight + Style.space(28)
+                color: root.alpha(root.foreground, 0.035)
+                borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+                radius: Style.cornerRadius
+
+                Column {
+                  id: addAccountContent
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(14)
+                  anchors.rightMargin: Style.space(14)
+                  spacing: Style.space(10)
+
+                  CardTitle {
+                    width: parent.width
+                    glyph: "󰐙"
+                    text: "New login"
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: "Name it, add it, then use Sign in on its row. It gets its own CLI home, so it never touches the default login."
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
+
+                  Row {
+                    width: parent.width
+                    spacing: Style.space(8)
+
+                    Rectangle {
+                      width: parent.width - addAccountButton.width - parent.spacing
+                      height: Style.space(32)
+                      radius: Style.cornerRadius
+                      color: root.alpha(root.foreground, 0.06)
+                      border.width: 1
+                      border.color: accountNameInput.activeFocus ? Commons.Color.accent : root.alpha(root.foreground, 0.2)
+
+                      TextInput {
+                        id: accountNameInput
+                        anchors.fill: parent
+                        anchors.leftMargin: Style.space(10)
+                        anchors.rightMargin: Style.space(10)
+                        verticalAlignment: TextInput.AlignVCenter
+                        clip: true
+                        color: root.foreground
+                        selectionColor: root.alpha(Commons.Color.accent, 0.4)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        maximumLength: 80
+                        onAccepted: accountSettingsContent.addNewAccount()
+
+                        Text {
+                          visible: accountNameInput.text === "" && !accountNameInput.activeFocus
+                          anchors.verticalCenter: parent.verticalCenter
+                          text: accountSettingsContent.providerLabel + " account name, e.g. Work"
+                          color: root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.bodySmall
+                        }
+                      }
+                    }
+
+                    Button {
+                      id: addAccountButton
+                      height: Style.space(32)
+                      text: "Add"
+                      enabled: accountNameInput.text.trim().length > 0
+                      selected: enabled
+                      bordered: true
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.bodySmall
+                      horizontalPadding: Style.space(14)
+                      onClicked: accountSettingsContent.addNewAccount()
+                    }
+                  }
+                }
+              }
+
+              BorderSurface {
+                width: parent.width
+                implicitHeight: importAccountContent.implicitHeight + Style.space(28)
+                color: root.alpha(root.foreground, 0.035)
+                borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+                radius: Style.cornerRadius
+
+                Column {
+                  id: importAccountContent
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(14)
+                  anchors.rightMargin: Style.space(14)
+                  spacing: Style.space(10)
+
+                  CardTitle {
+                    width: parent.width
+                    glyph: "󱃩"
+                    text: "Import existing logins"
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: "One CLI home per line (~/ works). A parent folder imports each account inside it. Only filenames are inspected; nothing is copied."
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
+
+                  Rectangle {
+                    width: parent.width
+                    height: Style.space(72)
+                    radius: Style.cornerRadius
+                    color: root.alpha(root.foreground, 0.06)
+                    border.width: 1
+                    border.color: accountPathsInput.activeFocus ? Commons.Color.accent : root.alpha(root.foreground, 0.2)
+
+                    TextEdit {
+                      id: accountPathsInput
+                      anchors.fill: parent
+                      anchors.margins: Style.space(10)
+                      clip: true
+                      color: root.foreground
+                      selectionColor: root.alpha(Commons.Color.accent, 0.4)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      textFormat: TextEdit.PlainText
+                      wrapMode: TextEdit.WrapAnywhere
+                      selectByMouse: true
+
+                      Text {
+                        visible: accountPathsInput.text === "" && !accountPathsInput.activeFocus
+                        width: parent.width
+                        text: accountSettingsContent.newProvider === "claude" ? "~/.claude-work\n~/.claude-accounts/" : "~/.codex-work\n~/.codex-accounts/"
+                        wrapMode: Text.WordWrap
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                      }
+                    }
+                  }
+
+                  Row {
+                    width: parent.width
+                    spacing: Style.space(10)
+
+                    Button {
+                      id: importAccountsButton
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: usage.accountImportRunning ? "Importing…" : "Import"
+                      enabled: accountPathsInput.text.trim().length > 0 && !usage.accountImportRunning
+                      selected: enabled
+                      bordered: true
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.bodySmall
+                      horizontalPadding: Style.space(14)
+                      onClicked: usage.importAccounts(accountSettingsContent.newProvider, accountPathsInput.text)
+                    }
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: parent.width - importAccountsButton.width - parent.spacing
+                      visible: usage.accountImportStatus !== ""
+                      text: usage.accountImportStatus
+                      textFormat: Text.PlainText
+                      wrapMode: Text.WordWrap
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+                }
+              }
+            }
+
             // ============================================= Display tab
             Column {
               visible: root.settingsTab === "display"
@@ -4588,8 +4905,8 @@ Panel {
 
                   SettingToggle {
                     width: parent.width
-                    title: "Open in detailed view"
-                    description: "Start every opening with activity, trend, models and API equivalent expanded."
+                    title: "Open on Activity"
+                    description: "Start every opening on the Activity view (calendar and trend) instead of Usage."
                     checked: usage.openInDetailedView
                     onToggled: usage.setOpenInDetailedView(!usage.openInDetailedView)
                   }
@@ -5292,6 +5609,245 @@ Panel {
             visible: segmentHover.containsMouse && String(segment.modelData.tip || "") !== ""
             text: String(segment.modelData.tip || "")
             fontFamily: root.fontFamily
+          }
+        }
+      }
+    }
+  }
+
+  // One limit window as a ring, with what the bar cannot show underneath:
+  // the reset as a countdown and as a clock time, and how the window is
+  // pacing. `creditMode` draws a prepaid balance's credit left instead.
+  component RingTile: Item {
+    id: ringTile
+    property var window: null
+    property bool creditMode: false
+    readonly property var pace: creditMode ? null : root.paceFor(window)
+    readonly property bool stale: !creditMode && root.windowIsStale(window)
+    readonly property bool hasValue: creditMode ? (!!root.balance && root.balance.funded > 0) : (!!window && window.percent >= 0)
+    readonly property real ringValue: creditMode
+      ? (hasValue ? root.clamp(root.balance.remaining / root.balance.funded, 0, 1) : 0)
+      : (hasValue ? root.displayPercent(window.percent) : 0)
+    readonly property string severity: creditMode ? root.balanceSeverity
+      : (stale || !hasValue ? "ok" : root.severityForPercent(window.percent))
+    readonly property real resetMs: creditMode ? -1 : root.resetMsFor(window)
+
+    implicitHeight: ringTileColumn.implicitHeight
+
+    Column {
+      id: ringTileColumn
+      width: parent.width
+      spacing: Style.space(4)
+
+      Item {
+        width: parent.width
+        height: Style.space(100)
+
+        RingGauge {
+          id: tileGauge
+          anchors.horizontalCenter: parent.horizontalCenter
+          width: parent.height
+          height: parent.height
+          value: ringTile.ringValue
+          marker: ringTile.pace ? root.displayPercent(ringTile.pace.elapsed) : -1
+          color: root.colorForSeverity(ringTile.severity)
+          thickness: Style.space(9)
+          opacity: ringTile.stale ? 0.55 : 1.0
+        }
+
+        Column {
+          anchors.centerIn: tileGauge
+          spacing: 0
+
+          Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: !ringTile.hasValue ? "—"
+              : (ringTile.creditMode ? Math.round(ringTile.ringValue * 100) + "%"
+                : Format.formatPercent(ringTile.window.percent, usage.showAvailablePercentage))
+            color: ringTile.severity === "ok" ? root.foreground : root.textFor(root.colorForSeverity(ringTile.severity))
+            font.family: root.fontFamily
+            font.pixelSize: Math.round(Style.font.display * 0.95)
+            font.bold: true
+          }
+
+          Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: ringTile.creditMode ? "credit left" : (usage.showAvailablePercentage ? "left" : "used")
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+      }
+
+      Text {
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        text: ringTile.creditMode ? "Prepaid credit" : (ringTile.window ? String(ringTile.window.title || "Limit") : "")
+        textFormat: Text.PlainText
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        font.bold: true
+        font.capitalization: Font.AllUppercase
+        font.letterSpacing: 0.8
+        elide: Text.ElideRight
+      }
+
+      // The reset, as large as the percentage it gives back.
+      Row {
+        anchors.horizontalCenter: parent.horizontalCenter
+        visible: !ringTile.creditMode
+        spacing: Style.space(5)
+
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: "󰑓"
+          color: root.accentText
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+        }
+
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: ringTile.stale ? "Reset" : (ringTile.resetMs > 0 ? root.formatDuration(ringTile.resetMs) : "No reset time")
+          color: ringTile.resetMs > 0 || ringTile.stale ? root.foreground : root.dim
+          font.family: root.fontFamily
+          font.pixelSize: ringTile.resetMs > 0 ? Math.round(Style.font.subtitle * 1.15) : Style.font.bodySmall
+          font.bold: ringTile.resetMs > 0
+        }
+      }
+
+      Text {
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        visible: text !== ""
+        // (Credit: the verdict beside the ring already states the amounts.)
+        text: ringTile.creditMode ? ""
+          : (ringTile.stale ? "updates on the next refresh"
+            : (ringTile.resetMs > 0 ? "resets " + root.resetClock(ringTile.window) : ""))
+        textFormat: Text.PlainText
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
+
+      Text {
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        visible: text !== ""
+        text: root.paceText(ringTile.pace)
+        textFormat: Text.PlainText
+        color: root.paceColor(ringTile.pace)
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
+    }
+  }
+
+  // A row of equal tabs with a glyph and label each; the current one is
+  // filled in the accent tint. `tabs` is [{ id, label, glyph }]; `badges`
+  // maps a tab id to true to mark it (unsaved edits, for example).
+  component TabStrip: Rectangle {
+    id: tabStrip
+    property var tabs: []
+    property string current: ""
+    property var badges: ({})
+    signal picked(string id)
+
+    // Glyphs show on every tab or on none: the widest label decides.
+    readonly property real cellWidth: (width - Style.space(6) - Style.space(3) * Math.max(0, tabs.length - 1))
+      / Math.max(1, tabs.length)
+    readonly property string longestLabel: {
+      var longest = ""
+      for (var i = 0; i < tabs.length; i++)
+        if (String(tabs[i].label).length > longest.length) longest = String(tabs[i].label)
+      return longest
+    }
+    readonly property bool showGlyphs: cellWidth >= tabLabelMetrics.advanceWidth + Style.font.body + Style.space(20)
+
+    TextMetrics {
+      id: tabLabelMetrics
+      text: tabStrip.longestLabel
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      font.bold: true
+    }
+
+    height: Style.space(34)
+    radius: Style.cornerRadius + Style.space(2)
+    color: root.alpha(root.foreground, 0.05)
+    border.width: 1
+    border.color: root.alpha(root.foreground, 0.10)
+
+    Row {
+      anchors.fill: parent
+      anchors.margins: Style.space(3)
+      spacing: Style.space(3)
+
+      Repeater {
+        model: tabStrip.tabs
+
+        Rectangle {
+          id: tabCell
+          required property var modelData
+          readonly property bool chosen: tabStrip.current === modelData.id
+          width: tabStrip.cellWidth
+          height: parent.height
+          radius: Style.cornerRadius
+          color: chosen ? root.alpha(Commons.Color.accent, 0.18)
+            : (tabCellHover.containsMouse ? root.alpha(root.foreground, 0.06) : "transparent")
+          border.width: chosen ? 1 : 0
+          border.color: root.alpha(Commons.Color.accent, 0.45)
+
+          Behavior on color { ColorAnimation { duration: 120 } }
+
+          Row {
+            anchors.centerIn: parent
+            spacing: Style.space(5)
+
+            // The glyphs give way (all together) when five tabs share a
+            // narrow row, so no label has to be cut.
+            Text {
+              id: tabCellGlyph
+              anchors.verticalCenter: parent.verticalCenter
+              text: tabCell.modelData.glyph || ""
+              visible: text !== "" && tabStrip.showGlyphs
+              color: tabCell.chosen ? root.accentText : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+
+            Text {
+              id: tabCellLabel
+              anchors.verticalCenter: parent.verticalCenter
+              text: tabCell.modelData.label
+              color: tabCell.chosen ? root.foreground : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: tabCell.chosen
+            }
+          }
+
+          Rectangle {
+            visible: !!tabStrip.badges[tabCell.modelData.id]
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.margins: Style.space(4)
+            width: Style.space(6)
+            height: width
+            radius: width / 2
+            color: root.warn
+          }
+
+          MouseArea {
+            id: tabCellHover
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: tabStrip.picked(tabCell.modelData.id)
           }
         }
       }
