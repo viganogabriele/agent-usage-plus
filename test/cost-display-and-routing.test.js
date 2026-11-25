@@ -46,7 +46,7 @@ test("panel keeps estimated API cost out of compact view", () => {
   assert.match(source, /root\.costProviderRows\.length/)
   assert.match(source, /text: "All providers"/)
   assert.match(source, /return "On subscription"/)
-  assert.match(source, /label: "API equivalent"/)
+  assert.match(source, /text: "If billed by API"/)
   assert.match(source, /root\.cost\.estimateUsd/)
 })
 
@@ -67,13 +67,14 @@ test("panel guards optional cost values before evaluating a hidden card", () => 
 })
 
 test("panel displays the collector cost period next to the estimate", () => {
-  assert.match(readCostCard(), /"API equivalent"\s*\+\s*\(root\.cost\s*&&\s*root\.cost\.period/)
+  assert.match(readCostCard(), /"If billed by API"\s*\+\s*\(root\.cost\s*&&\s*root\.cost\.period/)
 })
 
 test("cost details keep the partial disclosure neutral, singular, and only shown when actionable", () => {
   const source = readCostCard()
   assert.doesNotMatch(source, /color:\s*root\.warn/)
   assert.match(source, /Partial estimate/)
+  assert.match(source, /Estimated at published API rates · not a bill/)
   assert.match(source, /visible:\s*!!root\.provider\s*&&\s*\(!root\.cost\s*\|\|\s*root\.cost\.incomplete\)/)
 })
 
@@ -98,7 +99,8 @@ test("selected cost details use the spacious card rhythm", () => {
   assert.match(source, /implicitHeight: costValueContent\.implicitHeight \+ Style\.space\(36\)/)
   assert.match(source, /anchors\.leftMargin: Style\.space\(18\)/)
   assert.match(source, /anchors\.rightMargin: Style\.space\(18\)/)
-  assert.match(source, /id: costMetrics[\s\S]*?spacing: Style\.space\(14\)/)
+  assert.match(source, /id: costMetrics[\s\S]*?spacing: Style\.space\(10\)/)
+  assert.match(source, /font\.pixelSize: Style\.font\.display/)
   assert.match(source, /id: costModelRow[\s\S]*?height: Style\.space\(44\)/)
   assert.doesNotMatch(source, /costApiHint\(/)
 })

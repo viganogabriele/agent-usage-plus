@@ -50,9 +50,11 @@ is versioned in `logic/api-price-catalogue.js`. Update its version,
 `publishedAt`, source URL, and exact model entry in one reviewable change.
 Anthropic cache writes use the standard five-minute write rate because the
 record does not carry cache TTL; a collector with one-hour write usage must
-not estimate it until the contract can distinguish it. OpenAI cache-creation
-tokens use normal input price because OpenAI has no separate cache-write
-charge. Unknown model ids are never pattern-matched.
+not estimate it until the contract can distinguish it. OpenAI GPT-5.6 and
+later cache writes use 1.25 times the standard input rate. The estimate uses
+standard short-context rates: transcript totals do not reveal request-level
+context length, processing tier, or region, so those adjustments cannot be
+reconstructed. Unknown model ids are never pattern-matched.
 
 ## Collectors with their own price source
 
