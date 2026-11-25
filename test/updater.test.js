@@ -63,7 +63,7 @@ test("plugin refresh uses the Codex compatibility updater without a separate ins
       AGENT_USAGE_PLUS_CODEX_COLLECTOR: codex },
   })
   assert.deepEqual(fs.readFileSync(calls, "utf8").trim().split("\n").sort(),
-    ["codex:--force", "packaged:--except codex --force codex --except devin"])
+    ["codex:--force", "packaged:--except codex --force codex --except devin --except agy"])
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, "state/omarchy/agents/usage/codex.json"))).limits[0].percent, 0.2)
 })
 
