@@ -28,13 +28,51 @@ function normalizeProfiles(raw) {
 
 function nextProfileId(provider, name, existing) {
   if (provider !== "claude" && provider !== "codex") return ""
-  var slug = String(name || "").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48)
-  if (!slug) return ""
+  var label = String(name || "").trim()
+  if (!label) return ""
+  var slug = label.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^[-_]+|-+$/g, "").slice(0, 48) || "account"
   var base = provider + "-" + slug
   var id = base
   var suffix = 2
   while (Object.prototype.hasOwnProperty.call(existing || {}, id)) id = base + "-" + suffix++
   return id
+}
+
+// Merge just the edited entries into the latest settings. A null entry stages
+// a removal without mutating the live object or another provider's choices.
+function applyEdits(current, edits) {
+  var result = Object.assign({}, current)
+  for (var key of Object.keys(edits)) {
+    if (edits[key] === null) delete result[key]
+    else result[key] = edits[key]
+  }
+  return result
+}
+
+// Both interactive discovery and the diagnostic IPC use the same path
+// deduplication, including duplicates within one parent-directory import.
+function newProfiles(current, candidates) {
+  var all = Object.assign({}, current)
+  var additions = {}
+  for (var candidate of candidates) {
+    if (!candidate) continue
+    var id = nextProfileId(candidate.provider, candidate.name, all)
+    if (!id) continue
+    var profile = { provider: candidate.provider, name: candidate.name.trim().slice(0, 80) }
+    if (candidate.path) {
+      profile.path = candidate.path
+      if (Object.keys(all).some(function(key) {
+        return all[key].provider === profile.provider && all[key].path === profile.path
+      })) continue
+    }
+    all[id] = additions[id] = profile
+  }
+  return additions
+}
+
+function activeId(provider, profiles, selected) {
+  var id = selected && selected[provider]
+  return id && profiles[id] && profiles[id].provider === provider ? id : provider
 }
 
 function quote(value) { return "'" + String(value).replace(/'/g, "'\\''") + "'" }
@@ -52,4 +90,4 @@ function commandForProfile(id, provider, dataRoot, login, path, home) {
 }
 
 if (typeof module !== "undefined" && module.exports)
-  module.exports = { normalizeProfiles, nextProfileId, commandForProfile }
+  module.exports = { normalizeProfiles, nextProfileId, newProfiles, applyEdits, activeId, commandForProfile }

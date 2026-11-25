@@ -20,7 +20,7 @@ function formatTokenCount(n) {
 // interface is currently presenting. Keep this separate from threshold logic:
 // severity always classifies usage, even when meters run down toward zero.
 function displayPercent(percent, showAvailable) {
-  return showAvailable === true ? 1 - percent : percent
+  return showAvailable === true ? Math.max(0, 1 - percent) : percent
 }
 
 // A valid (>= 0) usage fraction as a whole-number string, e.g. 0.5 -> "50%".
@@ -30,7 +30,7 @@ function displayPercent(percent, showAvailable) {
 // since that fallback differs by call site.
 function formatPercent(percent, showAvailable) {
   var used = Math.round(percent * 100)
-  return (showAvailable === true ? 100 - used : used) + "%"
+  return (showAvailable === true ? Math.max(0, 100 - used) : used) + "%"
 }
 
 function formatDuration(ms) {

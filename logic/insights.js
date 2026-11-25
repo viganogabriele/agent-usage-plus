@@ -35,10 +35,25 @@ function windowSpanMs(window) {
   if (isFinite(started) && isFinite(reset) && reset > started) return reset - started
   if (window.titleExplicit === false) return 0
   var title = String(window.title || "").toLowerCase().trim()
-  if (title === "session") return 5 * HOUR_MS
-  if (/(^|\s)weekly$/.test(title)) return 7 * DAY_MS
-  if (/(^|\s)daily$/.test(title)) return DAY_MS
-  return 0
+  var span = 0
+  if (title === "session") span = 5 * HOUR_MS
+  else if (/(^|\s)weekly$/.test(title)) span = 7 * DAY_MS
+  else if (/(^|\s)daily$/.test(title)) span = DAY_MS
+  // A label that states its own, different length ("48h window") wins over
+  // the generic title: guessing would project against the wrong clock.
+  var stated = labelSpanMs(window.label)
+  if (span > 0 && stated > 0 && stated !== span) return 0
+  return span
+}
+
+// The window length a label states outright ("5h window", "30m", "2 days"),
+// or 0. Only ever used to *veto* a title-derived span, never to create one.
+function labelSpanMs(label) {
+  var match = /(\d+(?:\.\d+)?)\s*-?\s*(m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)\b/.exec(String(label || "").toLowerCase())
+  if (!match) return 0
+  var n = Number(match[1])
+  var unit = match[2].charAt(0)
+  return unit === "m" ? n * 60 * 1000 : unit === "h" ? n * HOUR_MS : n * DAY_MS
 }
 
 // How a window is tracking against its own clock.
@@ -72,8 +87,11 @@ function windowPace(window, nowMs, measuredAtMs) {
   var reset = isoMs(window.resetAt !== undefined ? window.resetAt : window.resetsAt)
   var now = Number(nowMs)
   if (!(span > 0) || !isFinite(reset) || !isFinite(now) || reset <= now) return null
-  var measured = Number(measuredAtMs)
-  if (!isFinite(measured) || measured > now) measured = now
+  // Omitted means "measured now"; anything passed must be a real instant that
+  // is not in the future, or the reading's age is unknown and pace withheld.
+  var measured = measuredAtMs === undefined ? now
+    : (measuredAtMs === null ? NaN : Number(measuredAtMs))
+  if (!isFinite(measured) || measured > now) return null
   if (now - measured > Math.max(15 * 60 * 1000, span * 0.1)) return null
 
   var elapsedMs = span - (reset - measured)

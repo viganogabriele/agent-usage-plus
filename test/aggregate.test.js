@@ -651,3 +651,31 @@ test("mergeProviderDisplay: carries the record's updatedAt, bounded", () => {
   assert.ok(long.updatedAt.length <= 40)
   assert.equal(Aggregate.mergeProviderDisplay({ id: "claude" }, null, null).updatedAt, "")
 })
+
+test("dashboards keep the full reported sync history and distinguish missing days from zero", () => {
+  const end = new Date()
+  const history = Array.from({ length: 31 }, (_, i) => {
+    const date = new Date(end)
+    date.setDate(date.getDate() - 30 + i)
+    return { date: Aggregate.dateString(date), messageCount: i }
+  }).filter((_, i) => i !== 19)
+  const profiles = Aggregate.aggregateSnapshots([{ deviceId: "desk", providers: {
+    "claude-work": { recentDays: history }, claude: { recentDays: [] }
+  } }]).providers
+  assert.deepEqual(profiles["claude-work"].recentDays, history)
+  assert.deepEqual(profiles.claude.recentDays, [])
+})
+
+test("malformed dates and amounts never become dashboard readings", () => {
+  const record = Aggregate.mergeProviderDisplay({
+    id: "test", balance: { remaining: null }, cost: { estimateUsd: "" },
+    limits: [{ percent: null }, { percent: "" }, { percent: true }, { percent: "Infinity" }, { percent: 0 }],
+    recentDays: [null, { date: "2026-02-30", messageCount: 7 }, { date: "2026-03-01", messageCount: 0 }]
+  }, null, null)
+  assert.equal(record.balance, null)
+  assert.equal(record.cost, null)
+  assert.deepEqual(record.limits.map(w => w.percent), [0])
+  assert.deepEqual(record.recentDays, [{ date: "2026-03-01", messageCount: 0 }])
+  assert.equal(Aggregate.balanceValue({ remaining: 0 }).remaining, 0)
+  assert.equal(Aggregate.costValue({ estimateUsd: 0 }).estimateUsd, 0)
+})

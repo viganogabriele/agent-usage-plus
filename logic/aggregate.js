@@ -66,15 +66,37 @@ function sanitizeDisplayText(raw, maxLen) {
 
 // Rate-limit windows come straight from a usage record; cap how many are
 // trusted and sanitize the free-text fields before they reach LimitRow.
+// A number only when the value really is one: unlike Number(), null, "",
+// booleans and arrays do not quietly become 0.
+function strictNumber(value) {
+  if (typeof value === "number") return value
+  if (typeof value === "string" && value.trim() !== "") return Number(value)
+  return NaN
+}
+
+// A real calendar day as "YYYY-MM-DD" from the start of `value`, or "".
+// 2026-02-30 is rejected rather than rolled over into March.
+function calendarDate(value) {
+  var match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value || ""))
+  if (!match) return ""
+  var y = Number(match[1]), m = Number(match[2]), d = Number(match[3])
+  var date = new Date(Date.UTC(y, m - 1, d))
+  if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) return ""
+  return match[0]
+}
+
 function sanitizeLimits(raw) {
   var list = Array.isArray(raw) ? raw : []
   var out = []
   for (var i = 0; i < list.length && out.length < 20; i++) {
     var entry = list[i] || {}
+    // Contract: a missing or negative percent drops the entry entirely.
+    var percent = strictNumber(entry.percent)
+    if (!isFinite(percent) || percent < 0) continue
     out.push({
       label: sanitizeDisplayText(entry.label, 80),
       title: sanitizeDisplayText(entry.title, 80),
-      percent: entry.percent,
+      percent: percent,
       tokenLimit: numberValue(entry.tokenLimit),
       resetsAt: sanitizeDisplayText(entry.resetsAt, 40),
       // Optional, but required for a defensible pace projection: guessing a
@@ -86,9 +108,19 @@ function sanitizeLimits(raw) {
   return out
 }
 
+// Valid days only, oldest first as the contract orders them; when over the
+// cap the newest 31 are kept, since the series ends on today.
 function capRecentDays(raw) {
   var list = Array.isArray(raw) ? raw : []
-  return list.length > 31 ? list.slice(0, 31) : list
+  var out = []
+  for (var i = 0; i < list.length && i < 400; i++) {
+    var day = list[i]
+    if (!day || typeof day !== "object") continue
+    var date = calendarDate(day.date)
+    if (date === "") continue
+    out.push({ date: date, messageCount: numberValue(day.messageCount) })
+  }
+  return out.length > 31 ? out.slice(out.length - 31) : out
 }
 
 // Bounds how many distinct model ids a single record/snapshot can push into
@@ -136,7 +168,7 @@ function sanitizeDeviceId(raw, fallback) {
 // per-account and never merged across devices.
 function balanceValue(raw) {
   if (!raw || typeof raw !== "object") return null
-  var remaining = Number(raw.remaining)
+  var remaining = strictNumber(raw.remaining)
   var funded = Number(raw.funded)
   if (!isFinite(remaining) || remaining < 0) return null
   return {
@@ -155,7 +187,7 @@ function balanceValue(raw) {
 // per-account and never merged across synced devices.
 function costValue(raw) {
   if (!raw || typeof raw !== "object") return null
-  var estimateUsd = Number(raw.estimateUsd)
+  var estimateUsd = strictNumber(raw.estimateUsd)
   if (!isFinite(estimateUsd) || estimateUsd < 0) return null
 
   var byModelIn = Array.isArray(raw.byModel) ? raw.byModel : []
@@ -264,14 +296,12 @@ function combineTokenBuckets(additive, target, source) {
 // feature builds on top of this merge.
 function aggregateSnapshots(snapshots, maxSnapshots) {
   var snapshotLimit = maxSnapshots || 50
-  var dates = recentDateStrings()
   var devices = safeMap()
   var providers = safeMap()
 
   function providerAcc(id) {
     if (providers[id]) return providers[id]
     var recentByDay = safeMap()
-    for (var d = 0; d < dates.length; d++) recentByDay[dates[d]] = 0
     providers[id] = {
       providerId: id,
       providerName: "",
@@ -343,12 +373,13 @@ function aggregateSnapshots(snapshots, maxSnapshots) {
         combineTokenBuckets(additive, todayBucket, todayUsage[todayModelId])
       }
 
-      var recent = Array.isArray(stats.recentDays) ? stats.recentDays : []
-      for (var r = 0; r < recent.length && r < 366; r++) {
-        var day = recent[r] || {}
-        var date = String(day.date || "")
-        if (acc.recentByDay[date] !== undefined)
-          acc.recentByDay[date] = combineNumber(additive, acc.recentByDay[date], day.messageCount)
+      // Keep every day a device actually reported (up to the 31-day cap
+      // applied below); a day nobody reported stays missing, not zero.
+      var recent = capRecentDays(stats.recentDays)
+      for (var r = 0; r < recent.length; r++) {
+        var date = recent[r].date
+        if (acc.recentByDay[date] === undefined && Object.keys(acc.recentByDay).length >= 400) continue
+        acc.recentByDay[date] = combineNumber(additive, acc.recentByDay[date], recent[r].messageCount)
       }
 
       var usage = capModelUsage(stats.modelUsage)
@@ -363,8 +394,10 @@ function aggregateSnapshots(snapshots, maxSnapshots) {
   var outProviders = safeMap()
   for (var id in providers) {
     var acc2 = providers[id]
+    var dayKeys = Object.keys(acc2.recentByDay).sort()
+    if (dayKeys.length > 31) dayKeys = dayKeys.slice(dayKeys.length - 31)
     var recentDays = []
-    for (var di = 0; di < dates.length; di++) recentDays.push({ date: dates[di], messageCount: acc2.recentByDay[dates[di]] || 0 })
+    for (var di = 0; di < dayKeys.length; di++) recentDays.push({ date: dayKeys[di], messageCount: acc2.recentByDay[dayKeys[di]] })
     var providerDevices = Object.keys(acc2.devices).sort()
     outProviders[id] = {
       providerId: acc2.providerId,

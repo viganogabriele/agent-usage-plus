@@ -195,7 +195,10 @@ Panel {
   readonly property var tokenMixData: (expanded && provider) ? Insights.tokenMix(provider.modelUsage || {}) : null
   // When the selected record's percentages were read; pace is measured at
   // that instant rather than at the panel's clock.
-  readonly property real measuredAtMs: provider ? Date.parse(String(provider.updatedAt || "")) : NaN
+  // updatedAt is optional in the collector contract: absent means "now";
+  // present but unparseable withholds pace rather than guessing its age.
+  readonly property var measuredAtMs: provider && String(provider.updatedAt || "") !== ""
+    ? Date.parse(String(provider.updatedAt)) : undefined
 
   function paceFor(window) {
     return window ? Insights.windowPace(window, root.nowMs, root.measuredAtMs) : null

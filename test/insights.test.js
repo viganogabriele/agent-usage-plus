@@ -251,3 +251,16 @@ test("tokenMix: non-finite counts are ignored", () => {
   const mix = Insights.tokenMix({ a: { inputTokens: "1e400", outputTokens: NaN, cacheReadInputTokens: -5, cacheCreationInputTokens: 10 } })
   assert.equal(mix.total, 10)
 })
+
+test("windowPace: explicitly missing or future measurement withholds the estimate", () => {
+  const window = { title: "Session", percent: 0.7, resetAt: iso(now + 2.5 * HOUR) }
+  for (const invalid of [NaN, null, now + HOUR]) assert.equal(Insights.windowPace(window, now, invalid), null)
+  assert.ok(Insights.windowPace(window, now))
+})
+
+test("windowSpanMs: a custom-duration bucket cannot inherit a conflicting weekly or session span", () => {
+  assert.equal(Insights.windowSpanMs({ title: "Model Weekly", label: "48h window" }), 0)
+  assert.equal(Insights.windowSpanMs({ title: "Session", label: "30m window" }), 0)
+  assert.equal(Insights.windowSpanMs({ title: "Session", label: "5h window" }), 5 * HOUR)
+  assert.equal(Insights.windowSpanMs({ title: "Limit", label: "5h window" }), 0)
+})
