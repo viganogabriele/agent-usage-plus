@@ -11,6 +11,7 @@ test("formatTokenCount: scales to K/M/B and passes small numbers through", () =>
   assert.equal(Format.formatTokenCount(1500), "1.5K")
   assert.equal(Format.formatTokenCount(2_500_000), "2.5M")
   assert.equal(Format.formatTokenCount(3_200_000_000), "3.2B")
+  assert.equal(Format.formatTokenCount(1_234_000_000_000), "1.2T")
 })
 
 test("formatTokenCount: undefined/null read as zero", () => {

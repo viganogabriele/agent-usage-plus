@@ -123,9 +123,22 @@ hover.
 | `label` | string | recommended | Free-text description of the window, e.g. `"Session (5-hour)"`, `"Weekly (7-day)"`, `"30m window"`. Used to infer `title` when `title` is absent, by looking for words like "week"/"7-day"/"month"/"30-day"/"session". Max 80 chars. |
 | `title` | string | no | Explicit, already-resolved window name (`"Session"`, `"Weekly"`, `"Monthly"`, or a model name like `"Opus 5 Weekly"` for a model-scoped limit). **Prefer setting this explicitly** — label-sniffing breaks on a label like `"Opus 5 (1M context)"`, where `"1M"` gets misread as a one-minute window. If your allowance is scoped to a specific model, title it `"<model display name> <Window>"` so it reads apart from the account-wide windows. Max 80 chars. |
 | `percent` | number, `0.0`-`1.0` | **yes** | Fraction of the allowance used, already normalized to `0.0`-`1.0` (not `0`-`100`). A negative value or a missing field causes the panel to drop that limit entry entirely rather than show a nonsensical number — so omit an entry you can't compute rather than sending a placeholder. |
-| `tokenLimit` | integer, > 0 | no | The actual token allowance for this exact window. Only provide it when the provider exposes a real quota, not an inferred conversion from `percent`. Together with token history and `resetsAt`, it enables the panel's burn-rate projection; without it the meter and reset countdown still work but no exhaustion prediction is shown. |
+| `tokenLimit` | integer, > 0 | no | The actual token allowance for this exact window. Only provide it when the provider exposes a real quota, not an inferred conversion from `percent`. Together with token history and `resetsAt`, it enables the panel's token burn-rate projection ("Token trend: exhausted in …"), which then replaces the window-pace run-out for that row. Without it the meter, reset countdown and window pace (below) still work. |
 | `resetsAt` | string (ISO-8601, with timezone) | no | When the window resets. Used to render "Resets in 3h 12m" and, on the next run, to decide whether a cached percentage is still valid (a window whose `resetsAt` has already passed is treated as stale and dropped rather than shown as a leftover reading). Omit or leave empty when unknown — the panel then just doesn't show a countdown. |
-| `startedAt` | string (ISO-8601, with timezone) | no | The actual start of this exact window. Keep it when the source has it: it makes cached readings auditable and is available to future finer-grained projection logic. Do not guess from a label. |
+| `startedAt` | string (ISO-8601, with timezone) | no | The actual start of this exact window. Keep it when the source has it: together with `resetsAt` it gives the window's exact length, which the panel's window pace needs (see below). Do not guess from a label. |
+
+**Window pace.** For each window the panel compares `percent` with how much
+of the window's clock had passed when the record was written (`updatedAt`):
+a tick on the meter, "12% ahead of pace" / "under pace", and — when the
+window's own average rate would reach 100% before `resetsAt` — "Out in 1h 20m
+at this rate". This needs the window's length, taken from `startedAt` +
+`resetsAt`, or from an explicit `title` of exactly `"Session"` (5 hours) or
+one ending in `"Weekly"` (7 days) or `"Daily"` (24 hours). A title the panel
+had to infer from `label`, or a calendar-aligned monthly window without
+`startedAt`, gets no pace. Pace is also withheld for the first 5% of a
+window, and when the record is older than 15 minutes or 10% of the window.
+Set `updatedAt` so a carried-forward reading is not judged against the
+current clock.
 
 Up to 20 limit entries per record are kept; extras are dropped. The panel
 picks the highest-`percent` entry as the "binding" one for the bar's meter

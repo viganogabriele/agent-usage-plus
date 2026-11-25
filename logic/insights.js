@@ -17,42 +17,54 @@ function isoMs(value) {
   return isFinite(n) ? n : NaN
 }
 
-// The length of a limit window. A collector's own startedAt/resetsAt pair
-// wins; otherwise only the two windows whose length is a published,
-// unambiguous fact (and the explicit "Daily"/"Monthly" titles) are
-// recognised. A model-scoped "Opus Weekly" title still ends in "weekly", so
-// it is read as a seven-day window like the account-wide one it mirrors.
+// The length of a limit window, or 0 when it is not established.
+//
+// A collector's own startedAt/resetsAt pair wins. Otherwise only an
+// explicit, collector-supplied title naming a window whose length is a
+// published fact counts: "Session" (the 5-hour window Claude and Codex
+// document), "...Weekly" (7 days, including model-scoped "Opus Weekly") and
+// "...Daily". A title the panel derived from a free-text label
+// (`titleExplicit === false`) never counts, and nothing is read out of the
+// label itself: "Opus 5 (1M context)" or a "30m window" would otherwise be
+// filed as a 5-hour session (see sanitizeLimits in logic/aggregate.js).
+// Monthly windows are usually calendar-aligned, so they need startedAt.
 function windowSpanMs(window) {
   if (!window) return 0
   var started = isoMs(window.startedAt)
   var reset = isoMs(window.resetAt !== undefined ? window.resetAt : window.resetsAt)
   if (isFinite(started) && isFinite(reset) && reset > started) return reset - started
+  if (window.titleExplicit === false) return 0
   var title = String(window.title || "").toLowerCase().trim()
-  if (/(^|\s)session$/.test(title) || title === "session") return 5 * HOUR_MS
+  if (title === "session") return 5 * HOUR_MS
   if (/(^|\s)weekly$/.test(title)) return 7 * DAY_MS
   if (/(^|\s)daily$/.test(title)) return DAY_MS
-  if (/(^|\s)monthly$/.test(title)) return 30 * DAY_MS
   return 0
 }
 
-// How a window is tracking against the clock.
+// How a window is tracking against its own clock.
+//
+// `measuredAtMs` is when `percent` was read (the record's updatedAt); it
+// defaults to `nowMs`. Elapsed time is taken at that instant, so a reading
+// that has sat unrefreshed does not drift toward "under pace" just because
+// the panel's clock moved on. A reading older than max(15 min, 10% of the
+// window) is too old to project from and returns null.
 //
 // Returns null when the window's length, reset, or a meaningful amount of
 // elapsed time is unknown. Otherwise:
-//   elapsed      0-1 fraction of the window already behind us
+//   elapsed      0-1 fraction of the window behind us at measurement time
 //   used         0-1 fraction of the allowance used (as reported)
 //   delta        used - elapsed (positive: burning faster than the clock)
 //   status       "idle" | "under" | "on" | "over"
 //   projected    linear projection of `used` at reset (may exceed 1)
-//   runsOutInMs  time until 100% at the current window rate, or -1 when the
-//                window resets first
-//   resetInMs    time until reset
+//   runsOutInMs  time from now until 100% at the window's own average rate,
+//                0 when already full, or -1 when the window resets first
+//   resetInMs    time from now until reset
 //
-// The projection is the window's *own* average rate (used / elapsed), never
+// The projection is the window's own average rate (used / elapsed), never
 // a token quota reverse-engineered from a percentage. It is withheld during
 // the first 5% of a window, where one early prompt would extrapolate into a
 // wildly alarming number.
-function windowPace(window, nowMs) {
+function windowPace(window, nowMs, measuredAtMs) {
   if (!window) return null
   var used = Number(window.percent)
   if (!isFinite(used) || used < 0) return null
@@ -60,8 +72,11 @@ function windowPace(window, nowMs) {
   var reset = isoMs(window.resetAt !== undefined ? window.resetAt : window.resetsAt)
   var now = Number(nowMs)
   if (!(span > 0) || !isFinite(reset) || !isFinite(now) || reset <= now) return null
-  var resetIn = reset - now
-  var elapsedMs = span - resetIn
+  var measured = Number(measuredAtMs)
+  if (!isFinite(measured) || measured > now) measured = now
+  if (now - measured > Math.max(15 * 60 * 1000, span * 0.1)) return null
+
+  var elapsedMs = span - (reset - measured)
   if (elapsedMs <= 0) return null
   var elapsed = Math.min(1, elapsedMs / span)
   if (elapsed < 0.05) return null
@@ -73,13 +88,12 @@ function windowPace(window, nowMs) {
   else if (delta < -0.05) status = "under"
   else status = "on"
 
-  var projected = used / elapsed
   var runsOutIn = -1
-  if (used > 0 && used < 1) {
-    var untilFull = (1 - used) / used * elapsedMs
-    if (untilFull < resetIn) runsOutIn = untilFull
-  } else if (used >= 1) {
+  if (used >= 1) {
     runsOutIn = 0
+  } else if (used > 0) {
+    var runsOutAt = measured + (1 - used) / used * elapsedMs
+    if (runsOutAt < reset) runsOutIn = Math.max(0, runsOutAt - now)
   }
 
   return {
@@ -87,10 +101,25 @@ function windowPace(window, nowMs) {
     used: used,
     delta: delta,
     status: status,
-    projected: projected,
+    projected: used / elapsed,
     runsOutInMs: runsOutIn,
-    resetInMs: resetIn
+    resetInMs: reset - now
   }
+}
+
+// Of several windows, the one that will run out first at its own rate
+// (before its reset), as { window, pace }; null when none is on course to
+// run out. A full window is excluded — it has already stopped you, and the
+// fullest-window gauge already says so.
+function firstRunOut(windows, nowMs, measuredAtMs) {
+  var list = Array.isArray(windows) ? windows : []
+  var best = null
+  for (var i = 0; i < list.length; i++) {
+    var pace = windowPace(list[i], nowMs, measuredAtMs)
+    if (!pace || pace.used >= 1 || !(pace.runsOutInMs >= 0)) continue
+    if (!best || pace.runsOutInMs < best.pace.runsOutInMs) best = { window: list[i], pace: pace }
+  }
+  return best
 }
 
 function dayValue(day) {
@@ -127,10 +156,15 @@ function shiftIso(iso, days) {
 //   best { date, value }                busiest recorded day
 //   avg7                                mean of the last 7 calendar days
 //                                       before today (-1 if fewer recorded)
+//   hasToday                            whether the record has an entry for
+//                                       today at all (a stats-cache
+//                                       fallback can stop short of it)
 //   todayVsAvg                          today / avg7 - 1 (null when avg7 is
-//                                       not available or zero)
-//   weekChange                          last-7 vs previous-7 day ratio - 1
-//                                       (null without 14 recorded days)
+//                                       unavailable or zero, or today has
+//                                       no entry)
+//   weekChange                          the last 7 complete days vs the 7
+//                                       before them, ratio - 1 (null
+//                                       without 14 recorded days)
 function activityStats(recentDays, todayIso) {
   var days = sortedDays(recentDays)
   var byDate = {}
@@ -170,20 +204,23 @@ function activityStats(recentDays, todayIso) {
     return { sum: sum, seen: seen }
   }
 
+  var hasToday = byDate[today] !== undefined
   var prior7 = windowSum(1, 7)
   var avg7 = prior7.seen >= 7 ? prior7.sum / 7 : -1
-  var todayVsAvg = avg7 > 0 ? todayValue / avg7 - 1 : null
+  var todayVsAvg = avg7 > 0 && hasToday ? todayValue / avg7 - 1 : null
 
-  var last7 = windowSum(0, 7)
-  var prev7 = windowSum(7, 7)
-  var weekChange = (last7.seen >= 7 && prev7.seen >= 7 && prev7.sum > 0)
-    ? last7.sum / prev7.sum - 1 : null
+  // Complete days only: including today's partial day made every morning
+  // read as a "quieter week".
+  var prev7 = windowSum(8, 7)
+  var weekChange = (prior7.seen >= 7 && prev7.seen >= 7 && prev7.sum > 0)
+    ? prior7.sum / prev7.sum - 1 : null
 
   return {
     total: total,
     activeDays: active,
     recordedDays: dates.length,
     today: todayValue,
+    hasToday: hasToday,
     streak: streak,
     best: best,
     avg7: avg7,
@@ -192,9 +229,9 @@ function activityStats(recentDays, todayIso) {
   }
 }
 
-// GitHub-style activity grid. Columns are weeks (oldest first), rows are
-// weekdays Monday..Sunday; the last column ends on the week containing
-// `todayIso`. Each cell carries its date, token value, a 0-4 intensity
+// GitHub-style activity grid: `weeks` is an array of weeks (oldest first),
+// each an array of seven days Monday..Sunday; the last week contains
+// `todayIso`. (The panel draws each week as a calendar row.) Each cell carries its date, token value, a 0-4 intensity
 // level, and flags for "after today" (future) and "no record" (missing), so
 // the panel can render an absent day differently from a real zero.
 //
@@ -220,9 +257,11 @@ function heatmapGrid(recentDays, todayIso, weeks) {
     for (var d = 0; d < 7; d++) {
       var ms = startMs + (w * 7 + d) * DAY_MS
       var iso = isoDay(ms)
-      var future = ms > todayMs
       var missing = byDate[iso] === undefined
       var value = missing ? 0 : byDate[iso]
+      // A collector writing UTC dates can already hold "tomorrow" for a
+      // user west of UTC; a day with data is shown, never hidden as future.
+      var future = ms > todayMs && missing
       if (!future && value > peak) peak = value
       column.push({ date: iso, value: value, future: future, missing: missing, today: iso === today, level: 0 })
     }
@@ -238,6 +277,11 @@ function heatmapGrid(recentDays, todayIso, weeks) {
   return { weeks: columns, peak: peak, weekCount: weekCount }
 }
 
+function finiteCount(value) {
+  var n = Number(value)
+  return isFinite(n) && n > 0 ? n : 0
+}
+
 // Token mix for a modelId -> TokenBucket map: how much of the traffic was
 // fresh input, output, and cache reads/writes, and the cache hit share of
 // all input-side tokens (cache reads / (input + cache reads + cache writes)).
@@ -246,10 +290,10 @@ function tokenMix(usageByModel) {
   var map = usageByModel && typeof usageByModel === "object" ? usageByModel : {}
   for (var id in map) {
     var b = map[id] || {}
-    input += Math.max(0, Number(b.inputTokens) || 0)
-    output += Math.max(0, Number(b.outputTokens) || 0)
-    cacheRead += Math.max(0, Number(b.cacheReadInputTokens) || 0)
-    cacheWrite += Math.max(0, Number(b.cacheCreationInputTokens) || 0)
+    input += finiteCount(b.inputTokens)
+    output += finiteCount(b.outputTokens)
+    cacheRead += finiteCount(b.cacheReadInputTokens)
+    cacheWrite += finiteCount(b.cacheCreationInputTokens)
   }
   var total = input + output + cacheRead + cacheWrite
   var inputSide = input + cacheRead + cacheWrite
@@ -276,6 +320,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     windowSpanMs: windowSpanMs,
     windowPace: windowPace,
+    firstRunOut: firstRunOut,
     activityStats: activityStats,
     heatmapGrid: heatmapGrid,
     tokenMix: tokenMix,

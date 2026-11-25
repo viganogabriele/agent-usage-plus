@@ -23,8 +23,33 @@ All notable changes to this project are documented in this file. The format is b
   - Details: a six-week activity calendar heatmap with recorded total, 7-day
     average and week-over-week change; a token-mix bar with cache hit share;
     a smoothed, area-filled token trend with a hover guide and tooltips.
+- Redesigned Settings at the panel's own width (it used to jump to twice
+  the width): Providers / Display / Alerts / Sync tabs; a card per provider
+  with its plan or problem, an Enabled switch, Bar slot and Bar shows
+  segmented controls and a live preview built from the real bar parts;
+  explained toggle rows; a threshold scale drawn from the values being
+  edited; and a pinned save bar (Discard / Save, a dot on the tab holding
+  the edit) that writes only the settings that changed.
+
+### Changed
+
+- Panel text is contrast-checked against the popup surface: secondary text
+  no longer drops below 4.5:1 on dark themes (Everforest, Gruvbox, Tokyo
+  Night, Nord) or reads darker than primary text on light ones, and amber,
+  red and accent text is deepened only as far as a theme needs (the fixed
+  amber was ~1.7:1 on every light theme). Meter and bar colors are
+  unchanged.
+- Token counts past a trillion read `1.2T` instead of `1234.0B`.
 
 ### Fixed
+
+- Bar marks with a dark twin (Codex, Devin, OpenRouter, …) were drawn
+  near-black on dark bars whose text color is a mid-tone light, such as
+  Tokyo Night's `#a9b1d6`: the light/dark choice used a 0.5 luminance cutoff
+  instead of the black/white contrast crossover (~0.18). Nothing else about
+  the bar changes.
+- With every provider turned off, the panel header and its Settings gear
+  disappeared, leaving only the `s` key to turn one back on.
 
 - Date labels under the token trend and the API-equivalent-by-day chart no
   longer pile up at the left edge (a `Row` collapsed its hidden labels), and

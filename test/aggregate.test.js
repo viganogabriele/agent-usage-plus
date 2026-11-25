@@ -643,3 +643,11 @@ test("applyProviderOrder: a stale id no longer present in the provider list is s
   const ordered = Aggregate.applyProviderOrder(providers, ["ghost", "codex", "claude"])
   assert.deepEqual(ordered.map((p) => p.providerId), ["codex", "claude"])
 })
+
+test("mergeProviderDisplay: carries the record's updatedAt, bounded", () => {
+  const record = { id: "claude", updatedAt: "2026-11-25T12:00:00+00:00" }
+  assert.equal(Aggregate.mergeProviderDisplay(record, null, null).updatedAt, "2026-11-25T12:00:00+00:00")
+  const long = Aggregate.mergeProviderDisplay({ id: "claude", updatedAt: "x".repeat(500) }, null, null)
+  assert.ok(long.updatedAt.length <= 40)
+  assert.equal(Aggregate.mergeProviderDisplay({ id: "claude" }, null, null).updatedAt, "")
+})

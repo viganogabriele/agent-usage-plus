@@ -318,7 +318,7 @@ Item {
 
   // True while a collector run this widget started is in flight; the
   // panel's refresh control spins on it.
-  readonly property bool updating: updateProcess.running
+  readonly property bool updating: !!updateProcess && updateProcess.running
 
   function updateCommand(kind, agentIds) {
     var updateArgs = []

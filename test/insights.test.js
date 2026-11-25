@@ -27,7 +27,24 @@ test("windowSpanMs: known titles, including model-scoped weekly", () => {
   assert.equal(Insights.windowSpanMs({ title: "Weekly" }), 7 * DAY)
   assert.equal(Insights.windowSpanMs({ title: "Opus Weekly" }), 7 * DAY)
   assert.equal(Insights.windowSpanMs({ title: "Daily" }), DAY)
-  assert.equal(Insights.windowSpanMs({ title: "Monthly" }), 30 * DAY)
+})
+
+test("windowSpanMs: calendar-aligned monthly windows need startedAt", () => {
+  assert.equal(Insights.windowSpanMs({ title: "Monthly" }), 0)
+  const span = Insights.windowSpanMs({ title: "Monthly", startedAt: "2026-02-01T00:00:00Z", resetAt: "2026-03-01T00:00:00Z" })
+  assert.equal(span, 28 * DAY)
+})
+
+test("windowSpanMs: a title derived from a label is never trusted", () => {
+  // The panel files "30m window" and "Opus 5 (1M context)" under "Session";
+  // without an explicit collector title that must not become 5 hours.
+  assert.equal(Insights.windowSpanMs({ title: "Session", titleExplicit: false }), 0)
+  assert.equal(Insights.windowSpanMs({ title: "Session", titleExplicit: true }), 5 * HOUR)
+})
+
+test("windowSpanMs: an explicit startedAt beats a title that disagrees", () => {
+  const span = Insights.windowSpanMs({ title: "Session", startedAt: iso(now - 20 * 60000), resetAt: iso(now + 10 * 60000) })
+  assert.equal(span, 30 * 60000)
 })
 
 test("windowSpanMs: unknown titles return 0 rather than a guess", () => {
@@ -87,8 +104,10 @@ test("activityStats: streak, best day, and averages", () => {
   assert.deepEqual(stats.best, { date: "2026-11-25", value: 300 })
   assert.equal(stats.avg7, 100)
   assert.equal(stats.todayVsAvg, 2)
-  // Last 7 days: 6×100 + 300 = 900. Previous 7: 6×50 + 100 = 400.
-  assert.equal(stats.weekChange, 900 / 400 - 1)
+  // Complete days only: the 7 days before today (7×100) vs the 7 before
+  // those (7×50).
+  assert.equal(stats.weekChange, 700 / 350 - 1)
+  assert.equal(stats.hasToday, true)
   assert.equal(stats.activeDays, 15)
 })
 
@@ -151,4 +170,84 @@ test("formatChange: signed whole percentages", () => {
   assert.equal(Insights.formatChange(-0.05), "−5%")
   assert.equal(Insights.formatChange(0.001), "±0%")
   assert.equal(Insights.formatChange(null), "")
+})
+
+test("activityStats: a quiet morning does not read as a quieter week", () => {
+  // Steady 100/day for 14 days, 10 tokens so far today.
+  const values = Array(14).fill(100).concat([10])
+  const stats = Insights.activityStats(days(values, "2026-11-25"), "2026-11-25")
+  assert.equal(stats.weekChange, 0)
+})
+
+test("activityStats: a record ending yesterday withholds the today comparison", () => {
+  const stats = Insights.activityStats(days(Array(10).fill(100), "2026-11-24"), "2026-11-25")
+  assert.equal(stats.hasToday, false)
+  assert.equal(stats.todayVsAvg, null)
+  assert.equal(stats.streak, 10)
+})
+
+test("windowPace: percent above 100% is reported as run out", () => {
+  const pace = Insights.windowPace({ title: "Session", percent: 1.3, resetAt: iso(now + HOUR) }, now)
+  assert.equal(pace.runsOutInMs, 0)
+  assert.equal(pace.status, "over")
+})
+
+test("windowPace: elapsed is taken when the reading was made, not now", () => {
+  const window = { title: "Session", percent: 0.5, resetAt: iso(now + 2.5 * HOUR) }
+  // Read 10 minutes ago: at that moment 2h20m of the 5h window had passed.
+  const pace = Insights.windowPace(window, now, now - 10 * 60000)
+  assert.ok(Math.abs(pace.elapsed - (140 / 300)) < 1e-9)
+  assert.equal(pace.resetInMs, 2.5 * HOUR)
+})
+
+test("windowPace: a reading too old to project from returns null", () => {
+  const window = { title: "Session", percent: 0.5, resetAt: iso(now + 2.5 * HOUR) }
+  assert.equal(Insights.windowPace(window, now, now - 2 * HOUR), null)
+  // A week-long window tolerates a proportionally older reading.
+  const weekly = { title: "Weekly", percent: 0.5, resetAt: iso(now + 3 * DAY) }
+  assert.ok(Insights.windowPace(weekly, now, now - 2 * HOUR))
+})
+
+test("firstRunOut: picks the window that empties first, not the fullest", () => {
+  const windows = [
+    // Fullest, but comfortably under pace.
+    { title: "Weekly", percent: 0.6, resetAt: iso(now + 2.1 * DAY) },
+    // Emptier, but burning fast: 45% after 30 minutes of a 5h window.
+    { title: "Session", percent: 0.45, resetAt: iso(now + 4.5 * HOUR) }
+  ]
+  const result = Insights.firstRunOut(windows, now)
+  assert.equal(result.window.title, "Session")
+  assert.ok(result.pace.runsOutInMs > 0 && result.pace.runsOutInMs < HOUR)
+  assert.equal(Insights.firstRunOut([windows[0]], now), null)
+  assert.equal(Insights.firstRunOut([{ title: "Session", percent: 1, resetAt: iso(now + HOUR) }], now), null)
+})
+
+test("heatmapGrid: today on a Monday and on a Sunday", () => {
+  const monday = Insights.heatmapGrid(days([1], "2026-11-23"), "2026-11-23", 1)
+  assert.equal(monday.weeks[0][0].today, true)
+  assert.equal(monday.weeks[0][1].future, true)
+  const sunday = Insights.heatmapGrid(days([1], "2026-11-29"), "2026-11-29", 1)
+  assert.equal(sunday.weeks[0][6].today, true)
+  assert.equal(sunday.weeks[0][0].date, "2026-11-23")
+})
+
+test("heatmapGrid: a day after today that has data is shown, not hidden", () => {
+  const grid = Insights.heatmapGrid(days([5, 9], "2026-11-26"), "2026-11-25", 1)
+  const tomorrow = grid.weeks[0][3]
+  assert.equal(tomorrow.date, "2026-11-26")
+  assert.equal(tomorrow.future, false)
+  assert.equal(tomorrow.level, 4)
+  assert.equal(grid.peak, 9)
+})
+
+test("heatmapGrid: month and leap-day boundaries", () => {
+  const grid = Insights.heatmapGrid(days([1, 2, 3], "2028-03-01"), "2028-03-01", 2)
+  const flat = grid.weeks.flat().map((c) => c.date)
+  assert.ok(flat.includes("2028-02-29"))
+  assert.ok(flat.includes("2028-03-01"))
+})
+
+test("tokenMix: non-finite counts are ignored", () => {
+  const mix = Insights.tokenMix({ a: { inputTokens: "1e400", outputTokens: NaN, cacheReadInputTokens: -5, cacheCreationInputTokens: 10 } })
+  assert.equal(mix.total, 10)
 })
