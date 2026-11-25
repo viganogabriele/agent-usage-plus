@@ -20,11 +20,42 @@ test("calculateCost rates every TokenBucket dimension for Claude", () => {
   assert.equal(result.cost.estimateUsd, example.expected.estimateUsd) // 3 + 15 + .3 + 3.75
 })
 
-test("calculateCost rates Codex cache writes at input price and returns day rows", () => {
+test("calculateCost prices current Claude Code models, including Opus 5.5", () => {
+  const bucket = { inputTokens: 1000000, outputTokens: 1000000, cacheReadInputTokens: 1000000, cacheCreationInputTokens: 1000000 }
+  const result = Cost.calculateCost({ provider: "claude", modelUsage: {
+    "claude-opus-5-5": bucket,
+    "claude-sonnet-5-5": bucket,
+  } })
+
+  assert.deepEqual(result.unknownModels, [])
+  assert.equal(result.cost.incomplete, false)
+  assert.equal(result.cost.byModel.find(row => row.model === "claude-opus-5-5").usd, 29.2)
+  assert.equal(result.cost.byModel.find(row => row.model === "claude-sonnet-5-5").usd, 14.7)
+})
+
+test("calculateCost uses current Codex standard rates and returns day rows", () => {
   const bucket = { inputTokens: 1000000, outputTokens: 1000000, cacheReadInputTokens: 1000000, cacheCreationInputTokens: 1000000 }
   const result = Cost.calculateCost({ provider: "codex", period: "30d", modelUsage: { "gpt-5.6-sol": bucket }, dailyModelUsage: { "2026-08-23": { "gpt-5.6-sol": bucket } } })
-  assert.equal(result.cost.estimateUsd, 40.5) // 5 + 30 + .5 + 5
-  assert.deepEqual(result.cost.byDay, [{ date: "2026-08-23", usd: 40.5 }])
+  assert.equal(result.cost.estimateUsd, 29.4) // 4 + 20 + .4 + 5
+  assert.deepEqual(result.cost.byDay, [{ date: "2026-08-23", usd: 29.4 }])
+})
+
+test("calculateCost covers GPT-6 and charges cache writes at 1.25 times input", () => {
+  const bucket = { inputTokens: 1000000, outputTokens: 1000000, cacheReadInputTokens: 1000000, cacheCreationInputTokens: 1000000 }
+  const result = Cost.calculateCost({ provider: "codex", modelUsage: {
+    "gpt-6-astra": bucket,
+    "gpt-6-sol": bucket,
+    "gpt-6-luna": bucket,
+    "gpt-5.6-terra": bucket,
+    "gpt-5.6-luna": bucket,
+  } })
+
+  assert.deepEqual(result.unknownModels, [])
+  assert.equal(result.cost.byModel.find(row => row.model === "gpt-6-astra").usd, 73.5)
+  assert.equal(result.cost.byModel.find(row => row.model === "gpt-6-sol").usd, 14.7)
+  assert.equal(result.cost.byModel.find(row => row.model === "gpt-6-luna").usd, 0.735)
+  assert.equal(result.cost.byModel.find(row => row.model === "gpt-5.6-terra").usd, 16.7)
+  assert.equal(result.cost.byModel.find(row => row.model === "gpt-5.6-luna").usd, 1.67)
 })
 
 test("calculateCost marks the priced subtotal partial when another used model is unknown", () => {

@@ -4,13 +4,13 @@
 // `publishedAt` date and affected model entry together.
 
 var PRICE_CATALOGUE = {
-  version: "2026-08-23",
+  version: "2026-09-29",
   currency: "USD",
   unit: "per-1m-tokens",
   providers: {
     claude: {
-      source: "https://docs.anthropic.com/en/docs/about-claude/pricing",
-      publishedAt: "2026-08-23",
+      source: "https://platform.claude.com/docs/en/about-claude/pricing",
+      publishedAt: "2026-09-29",
       // cacheCreationInputTokens has no TTL in the record contract. The
       // normal 5-minute cache-write rate is therefore the only defensible
       // default; collectors with 1-hour cache data must not reuse this
@@ -19,6 +19,8 @@ var PRICE_CATALOGUE = {
         // Current Claude Code transcript ids. Rates are first-party Claude
         // API standard rates, not the subscription price or a cloud-reseller
         // regional/fast-mode surcharge.
+        "claude-opus-5-5": { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
+        "claude-sonnet-5-5": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
         "claude-opus-5": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
         "claude-sonnet-5": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
         "claude-haiku-4-5-20251001": { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
@@ -30,15 +32,19 @@ var PRICE_CATALOGUE = {
       }
     },
     codex: {
-      source: "https://openai.com/api/pricing/",
-      publishedAt: "2026-08-23",
-      // OpenAI has no separate cache-write price: cache-creation tokens are
-      // charged as normal input. The model map intentionally uses exact
-      // transcript ids, never fuzzy matching unknown future models.
+      source: "https://developers.openai.com/api/docs/pricing",
+      publishedAt: "2026-09-29",
+      // GPT-5.6 and later charge cache writes at 1.25x input. The model map
+      // intentionally uses exact transcript ids, never fuzzy matching.
+      // These are standard short-context rates; transcripts do not identify
+      // long-context or faster processing tiers.
       models: {
-        "gpt-5.6-sol": { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 5 },
-        "gpt-5.6-terra": { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2 },
-        "gpt-5.6-luna": { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.2 },
+        "gpt-6-astra": { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+        "gpt-6-sol": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+        "gpt-6-luna": { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+        "gpt-5.6-sol": { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 },
+        "gpt-5.6-terra": { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5 },
+        "gpt-5.6-luna": { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 },
         "gpt-5.5": { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 5 },
         "gpt-5.3-codex": { input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 1.75 },
         "gpt-5-codex": { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 1.25 }

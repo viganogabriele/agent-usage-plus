@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "id": "io.github.viganogabriele.agent-usage-plus",
-  "name": "Agent Usage Plus",
-  "version": "2.2.0",
+  "name": "AI Agent Usage Plus",
+  "version": "2.3.0",
   "author": "Gabriele Vigano",
   "license": "MIT",
   "description": "Live AI coding-subscription usage, limits, API-rate estimates, and token history in a native Omarchy bar panel.",
@@ -14,7 +14,7 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "Agent Usage Plus",
+    "displayName": "AI Agent Usage Plus",
     "description": "One bar icon and one panel: rate-limit meters with pace, today, the last week, and the all-time model breakdown for every subscription.",
     "category": "AI",
     "aliases": [

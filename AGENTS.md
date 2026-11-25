@@ -52,8 +52,8 @@ small, data-safe, and visually verified; a plausible QML diff is not enough.
   "3 fixed + cycle slots" style budget). The only real ceiling is however
   many providers the person has actually configured (Fixed count + Cycle
   slots), which is itself already bounded by how many providers exist to
-  configure. `selectBarLayout`'s own `Math.min(10, ...)` — the number of
-  bundled collectors — is the one non-arbitrary safety clamp; `barSlotLimit`
+  configure, including additional account records. `selectBarLayout` clamps
+  to the eligible list's length; `barSlotLimit`
   (Main.qml) and `maxBarProviderSlots` (Panel.qml) exist only so
   `selectBarLayout`/the "+N" affordance have *a* number to work with and
   should stay far above anything a real configuration would hit.

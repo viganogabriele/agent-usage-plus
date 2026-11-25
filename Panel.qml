@@ -9,6 +9,7 @@ import "logic/format.js" as Format
 import "logic/aggregate.js" as Aggregate
 import "logic/history.js" as History
 import "logic/agents.js" as Agents
+import "logic/accounts.js" as Accounts
 import "logic/pace.js" as Pace
 import "logic/cost-analytics.js" as CostAnalytics
 import "logic/notifications.js" as Notify
@@ -62,6 +63,23 @@ Panel {
     return 0
   }
   readonly property var provider: providers.length > 0 ? providers[providerIndex] : null
+  readonly property string accountBrand: provider ? (provider.brand || provider.providerId) : ""
+  readonly property var accountRows: providers.filter(function(p) {
+    return (p.brand || p.providerId) === root.accountBrand
+  })
+  readonly property var configuredAccounts: {
+    var rows = []
+    var profiles = usage.accountProfiles
+    for (var id in profiles) rows.push({ id: id, provider: profiles[id].provider, name: profiles[id].name, path: profiles[id].path || "" })
+    return rows.sort(function(a, b) { return a.id.localeCompare(b.id) })
+  }
+  function accountRecordExists(id) {
+    var revision = usage.dataRevision
+    var agents = usage.agents || []
+    for (var i = 0; i < agents.length; i++)
+      if (agents[i] && agents[i].record && agents[i].record.id === id) return true
+    return false
+  }
 
   property bool cursorActive: false
 
@@ -351,7 +369,20 @@ Panel {
   // omarchy-agent reads ~/.config/omarchy/defaults/agent, which is the only
   // sensible answer when the click doesn't name a provider.
   function launchAgent(providerId) {
-    if (root.bar) root.bar.run(Agents.launchCommandFor(providerId))
+    var profile = usage.accountProfiles[providerId]
+    var command = profile
+      ? Accounts.commandForProfile(providerId, profile.provider, usage.accountDataRoot, false, profile.path, usage.home) : ""
+    if (root.bar) root.bar.run(command
+      ? Agents.WORKDIR_GUARD + Agents.LAUNCH_PREFIX + " " + command
+      : Agents.launchCommandFor(providerId))
+    root.close()
+  }
+
+  function loginToAccount(accountId) {
+    var profile = usage.accountProfiles[accountId]
+    if (!profile || !root.bar) return
+    var command = Accounts.commandForProfile(accountId, profile.provider, usage.accountDataRoot, true, profile.path, usage.home)
+    if (command) root.bar.run(Agents.WORKDIR_GUARD + Agents.LAUNCH_PREFIX + " " + command)
     root.close()
   }
 
@@ -621,12 +652,6 @@ Panel {
 
   function costApiValue(row) {
     return row && row.hasCost ? root.formatUsd(row.estimateUsd) : "—"
-  }
-
-  function costApiHint(row) {
-    if (!row || !row.hasCost) return "No pricing data"
-    if (row.incomplete) return "Partial estimate"
-    return "API rate estimate"
   }
 
   // Combines the two small-print footer lines (price-catalogue coverage and
@@ -905,6 +930,13 @@ Panel {
     // calls, including its queue and visible result state.
     function testNotification(): string { root.sendTestNotification(); return "queued" }
     function notificationStatus(): string { return root.notificationTestStatus }
+    function importCodexPaths(paths: string): string {
+      usage.importAccounts("codex", paths)
+      return "queued"
+    }
+    function accountStatus(): string {
+      return JSON.stringify({ profiles: usage.accountProfiles, status: usage.accountImportStatus })
+    }
   }
 
   // The provider's primary window: session when it reports one (Claude),
@@ -1121,20 +1153,28 @@ Panel {
     notifyProcess.running = true
   }
 
-  // A compact metric tile keeps the important cost signals aligned without
-  // turning each one into another warning-looking sentence.
+  // Compact metric tiles give the three key numbers a deliberate visual
+  // hierarchy instead of making them read like a wrapped sentence.
   component CostMetric: Item {
     id: costMetric
     property string label: ""
     property string valueText: ""
     property string hint: ""
 
-    implicitHeight: metricContent.implicitHeight
+    implicitHeight: metricContent.implicitHeight + Style.space(16)
+
+    Rectangle {
+      anchors.fill: parent
+      radius: Style.cornerRadius
+      color: root.alpha(root.foreground, 0.055)
+      border.width: 1
+      border.color: root.alpha(root.foreground, 0.10)
+    }
 
     Column {
       id: metricContent
-      anchors.left: parent.left
-      anchors.right: parent.right
+      anchors.fill: parent
+      anchors.margins: Style.space(8)
       spacing: Style.space(2)
 
       Text {
@@ -1161,7 +1201,10 @@ Panel {
       }
 
       Text {
-        visible: costMetric.hint !== ""
+        // Always present, even when blank, so all three metric tiles in a
+        // row reserve the same height — Column drops invisible items from
+        // the layout, which used to make an empty-hint tile shorter than
+        // its neighbours.
         width: parent.width
         text: costMetric.hint
         textFormat: Text.PlainText
@@ -1531,8 +1574,7 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if (t === "r" || t === "R") root.refreshNow()
-        else if (t === "e" || t === "E") root.toggleExpanded()
+        if (t === "e" || t === "E") root.toggleExpanded()
         else if (t === "s" || t === "S") root.toggleSettings()
       }
 
@@ -1667,6 +1709,57 @@ Panel {
                   color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.display
+                }
+              }
+            }
+          }
+
+          Column {
+            id: accountComparison
+            visible: (root.accountBrand === "claude" || root.accountBrand === "codex")
+              && root.accountRows.length > 1 && !root.settingsOpen
+            width: parent.width
+            spacing: Style.space(6)
+
+            PanelSectionHeader {
+              width: parent.width
+              text: root.accountBrand === "claude" ? "Claude accounts" : "Codex accounts"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Repeater {
+              model: root.accountRows
+
+              Row {
+                id: accountRow
+                required property var modelData
+                width: accountComparison.width
+                spacing: Style.space(8)
+
+                Button {
+                  width: parent.width - useAccountButton.width - parent.spacing
+                  text: accountRow.modelData.providerName + "  ·  " + root.providerPercentText(accountRow.modelData)
+                  tooltipText: "Show limits for " + accountRow.modelData.providerName
+                  selected: root.selectedProviderId === accountRow.modelData.providerId
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.bodySmall
+                  onClicked: root.selectedProviderId = accountRow.modelData.providerId
+                }
+
+                Button {
+                  id: useAccountButton
+                  width: Style.space(68)
+                  text: usage.activeAccountId(root.accountBrand) === accountRow.modelData.providerId ? "Active" : "Use"
+                  tooltipText: "Choose this account for the bar"
+                  selected: usage.activeAccountId(root.accountBrand) === accountRow.modelData.providerId
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.caption
+                  onClicked: usage.selectAccount(root.accountBrand, accountRow.modelData.providerId)
                 }
               }
             }
@@ -1830,7 +1923,7 @@ Panel {
           Text {
             visible: providerSwitch.visible
             width: parent.width
-            text: "Drag to reorder"
+            text: root.providers.length + " providers · drag marks to reorder"
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -2141,14 +2234,14 @@ Panel {
 
                 PanelSectionHeader {
                   width: parent.width
-                  text: "Plan vs API"
+                  text: "All providers"
                   foreground: root.foreground
                   fontFamily: root.fontFamily
                 }
 
                 Text {
                   width: parent.width
-                  text: "On plan/credit versus published API-rate equivalent"
+                  text: "Estimated at published API rates · periods vary by provider"
                   textFormat: Text.PlainText
                   color: root.dim
                   font.family: root.fontFamily
@@ -2186,7 +2279,7 @@ Panel {
 
                   Text {
                     id: providerApiColumn
-                    text: "IF API"
+                    text: "API EST."
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
@@ -2276,6 +2369,22 @@ Panel {
                       anchors.topMargin: Style.space(4)
                     }
 
+                    Text {
+                      width: providerCostApiValue.width
+                      text: !providerCostRow.modelData.hasCost ? "No estimate"
+                        : (providerCostRow.modelData.incomplete ? "Partial" : "Estimate")
+                          + (providerCostRow.modelData.period ? " · " + providerCostRow.modelData.period : "")
+                      textFormat: Text.PlainText
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      horizontalAlignment: Text.AlignRight
+                      elide: Text.ElideRight
+                      anchors.right: parent.right
+                      anchors.top: providerCostApiValue.bottom
+                      anchors.topMargin: Style.space(1)
+                    }
+
                     Rectangle {
                       id: providerUsageTrack
                       visible: Number(providerCostRow.modelData.usagePercent) >= 0
@@ -2305,7 +2414,7 @@ Panel {
               id: costValueCard
               visible: !!root.provider
               width: parent.width
-              implicitHeight: costValueContent.implicitHeight + Style.space(28)
+              implicitHeight: costValueContent.implicitHeight + Style.space(36)
               color: root.alpha(root.foreground, 0.035)
               borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
               radius: Style.cornerRadius
@@ -2315,28 +2424,45 @@ Panel {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                anchors.leftMargin: Style.space(14)
-                anchors.rightMargin: Style.space(14)
-                spacing: Style.space(10)
+                anchors.leftMargin: Style.space(18)
+                anchors.rightMargin: Style.space(18)
+                spacing: Style.space(14)
 
                 PanelSectionHeader {
                   width: parent.width
-                  text: "Plan vs API" + (root.cost && root.cost.period ? " · " + root.cost.period : "")
+                  text: "If billed by API" + (root.cost && root.cost.period ? " · " + root.cost.period : "")
                   foreground: root.foreground
                   fontFamily: root.fontFamily
                 }
 
                 Text {
-                  // The "not a bill" disclaimer is already implied by the "If
-                  // billed by API" metric label below, so it's only worth a
-                  // full line here when there's something actionable to say:
-                  // a partial estimate, or no priced data at all.
+                  width: parent.width
+                  text: root.cost ? root.formatUsd(root.cost.estimateUsd) : "—"
+                  textFormat: Text.PlainText
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.display
+                  font.bold: true
+                  elide: Text.ElideRight
+                }
+
+                Text {
+                  width: parent.width
+                  text: "Estimated at published API rates · not a bill"
+                  textFormat: Text.PlainText
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
+                }
+
+                Text {
                   id: costDisclosure
                   visible: !!root.provider && (!root.cost || root.cost.incomplete)
                   width: parent.width
-                  text: root.cost
-                    ? "Partial estimate · " + root.unpricedModelText(root.cost)
-                    : "No priced token total for this provider yet."
+                  text: !root.cost
+                    ? "No priced token total for this provider yet."
+                    : "Partial estimate · " + root.unpricedModelText(root.cost)
                   textFormat: Text.PlainText
                   color: root.dim
                   font.family: root.fontFamily
@@ -2347,27 +2473,20 @@ Panel {
                 Row {
                   id: costMetrics
                   width: parent.width
-                  spacing: Style.space(8)
+                  spacing: Style.space(10)
 
                   CostMetric {
-                    width: (costMetrics.width - costMetrics.spacing * 2) / 3
+                    width: (costMetrics.width - costMetrics.spacing) / 2
                     valueText: root.costPlanValue(root.costProviderRow(root.provider))
                     label: root.costPlanLabel(root.costProviderRow(root.provider))
                     hint: root.costPlanHint(root.costProviderRow(root.provider))
                   }
 
                   CostMetric {
-                    width: (costMetrics.width - costMetrics.spacing * 2) / 3
-                    valueText: root.cost ? root.formatUsd(root.cost.estimateUsd) : "—"
-                    label: "If billed by API"
-                    hint: root.costApiHint(root.costProviderRow(root.provider))
-                  }
-
-                  CostMetric {
-                    width: (costMetrics.width - costMetrics.spacing * 2) / 3
+                    width: (costMetrics.width - costMetrics.spacing) / 2
                     valueText: root.costSummary && root.costSummary.hasDailyAverage
                       ? root.formatUsd(root.costSummary.averageDailyUsd) : "—"
-                    label: "Avg / recorded day"
+                    label: "Avg / day"
                     hint: root.costSummary && root.costSummary.hasDailyAverage
                       ? root.costSummary.averageDailyDays + " recorded days" : "No day count"
                   }
@@ -2377,21 +2496,23 @@ Panel {
                   id: costDailyBlock
                   visible: !!root.cost && root.costDailyRows.length > 0
                   width: parent.width
-                  spacing: Style.space(6)
+                  spacing: Style.space(10)
 
                   PanelSectionHeader {
                     width: parent.width
-                    text: "API equivalent by day"
+                    text: "Daily API trend"
                     foreground: root.foreground
                     fontFamily: root.fontFamily
                   }
 
                   Text {
+                    // Day count is dropped here: it's already stated by the
+                    // "Avg / recorded day" metric's hint above, so this line
+                    // only adds what that metric doesn't cover.
                     visible: root.costDailyRows.length > 0
                     width: parent.width
                     text: root.costSummary
-                      ? root.costDailyRows.length + " recorded days · "
-                        + root.formatUsd(root.costSummary.dailyTotalUsd)
+                      ? root.formatUsd(root.costSummary.dailyTotalUsd)
                         + (root.costSummary.dailySource === "reported" ? " reported" : " derived")
                       : ""
                     textFormat: Text.PlainText
@@ -2404,7 +2525,7 @@ Panel {
                     id: costDailyChart
                     visible: root.costDailyRows.length > 0
                     width: parent.width
-                    height: Style.space(154)
+                    height: Style.space(166)
 
                     readonly property real axisLeft: Style.space(48)
                     readonly property real axisRight: Style.space(8)
@@ -2523,7 +2644,7 @@ Panel {
                   id: costModelChart
                   visible: root.costModelRows.length > 0
                   width: parent.width
-                  spacing: Style.space(6)
+                  spacing: Style.space(10)
 
                   PanelSectionHeader {
                     width: parent.width
@@ -2539,7 +2660,7 @@ Panel {
                       id: costModelRow
                       required property var modelData
                       width: costModelChart.width
-                      height: Style.space(38)
+                      height: Style.space(44)
 
                       Text {
                         id: costModelName
@@ -2996,6 +3117,205 @@ Panel {
               text: "SETTINGS"
               foreground: root.foreground
               fontFamily: root.fontFamily
+            }
+
+            BorderSurface {
+              id: accountSettings
+              width: parent.width
+              implicitHeight: accountSettingsContent.implicitHeight + Style.space(28)
+              color: root.alpha(root.foreground, 0.035)
+              borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+              radius: Style.cornerRadius
+
+              Column {
+                id: accountSettingsContent
+                anchors.fill: parent
+                anchors.margins: Style.space(14)
+                spacing: Style.space(10)
+                property string newProvider: "codex"
+                function addNewAccount() {
+                  if (usage.addAccount(newProvider, accountNameInput.text)) accountNameInput.text = ""
+                }
+
+                Text {
+                  text: "Accounts"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                }
+
+                Text {
+                  width: parent.width
+                  text: "Import existing CLI accounts from one or more paths, or create a new account below. Each account keeps its own login and limits."
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
+                }
+
+                Row {
+                  spacing: Style.space(6)
+
+                  Repeater {
+                    model: ["claude", "codex"]
+                    Button {
+                      required property string modelData
+                      text: modelData === "claude" ? "Claude" : "Codex"
+                      selected: accountSettingsContent.newProvider === modelData
+                      bordered: true
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.caption
+                      onClicked: accountSettingsContent.newProvider = modelData
+                    }
+                  }
+                }
+
+                Rectangle {
+                  width: parent.width
+                  height: Style.space(78)
+                  radius: Style.cornerRadius
+                  color: root.alpha(root.foreground, 0.06)
+                  border.width: 1
+                  border.color: root.alpha(root.foreground, accountPathsInput.activeFocus ? 0.4 : 0.2)
+
+                  TextEdit {
+                    id: accountPathsInput
+                    anchors.fill: parent
+                    anchors.margins: Style.space(8)
+                    clip: true
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    textFormat: TextEdit.PlainText
+                    wrapMode: TextEdit.WrapAnywhere
+                    selectByMouse: true
+
+                    Text {
+                      visible: accountPathsInput.text === "" && !accountPathsInput.activeFocus
+                      text: "Existing account paths, one per line\nExample: ~/.codex-t3/ (imports its accounts)"
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                  }
+                }
+
+                Button {
+                  text: usage.accountImportRunning ? "Importing…" : "Import paths"
+                  enabled: accountPathsInput.text.trim().length > 0 && !usage.accountImportRunning
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.caption
+                  onClicked: usage.importAccounts(accountSettingsContent.newProvider, accountPathsInput.text)
+                }
+
+                Text {
+                  width: parent.width
+                  visible: usage.accountImportStatus !== ""
+                  text: usage.accountImportStatus
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Row {
+                  width: parent.width
+                  spacing: Style.space(8)
+
+                  Rectangle {
+                    width: parent.width - addAccountButton.width - parent.spacing
+                    height: Style.space(32)
+                    radius: Style.cornerRadius
+                    color: root.alpha(root.foreground, 0.06)
+                    border.width: 1
+                    border.color: root.alpha(root.foreground, accountNameInput.activeFocus ? 0.4 : 0.2)
+
+                    TextInput {
+                      id: accountNameInput
+                      anchors.fill: parent
+                      anchors.leftMargin: Style.space(8)
+                      anchors.rightMargin: Style.space(8)
+                      verticalAlignment: TextInput.AlignVCenter
+                      clip: true
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      maximumLength: 80
+                      onAccepted: accountSettingsContent.addNewAccount()
+
+                      Text {
+                        visible: accountNameInput.text === "" && !accountNameInput.activeFocus
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Account name, e.g. Work"
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                      }
+                    }
+                  }
+
+                  Button {
+                    id: addAccountButton
+                    text: "Add"
+                    enabled: accountNameInput.text.trim().length > 0
+                    selected: enabled
+                    bordered: true
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    fontSize: Style.font.caption
+                    onClicked: accountSettingsContent.addNewAccount()
+                  }
+                }
+
+                Repeater {
+                  model: root.configuredAccounts
+
+                  Row {
+                    id: configuredAccountRow
+                    required property var modelData
+                    width: accountSettingsContent.width
+                    spacing: Style.space(8)
+
+                    Text {
+                      width: parent.width - loginButton.width - removeButton.width - Style.space(16)
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: configuredAccountRow.modelData.name + (configuredAccountRow.modelData.path ? "\n" + configuredAccountRow.modelData.path : "")
+                      textFormat: Text.PlainText
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      elide: Text.ElideRight
+                    }
+
+                    Button {
+                      id: loginButton
+                      text: enabled ? "Sign in" : "Preparing…"
+                      enabled: root.accountRecordExists(configuredAccountRow.modelData.id)
+                      bordered: true
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.caption
+                      onClicked: root.loginToAccount(configuredAccountRow.modelData.id)
+                    }
+
+                    Button {
+                      id: removeButton
+                      text: "Remove"
+                      tooltipText: "Remove from the widget; keep the CLI login directory"
+                      bordered: true
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.caption
+                      onClicked: usage.removeAccount(configuredAccountRow.modelData.id)
+                    }
+                  }
+                }
+              }
             }
 
             // ----- Per-provider controls -----

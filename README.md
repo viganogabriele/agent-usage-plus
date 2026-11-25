@@ -1,6 +1,6 @@
-# Agent Usage Plus
+# AI Agent Usage Plus
 
-![Agent Usage Plus](preview.png)
+![AI Agent Usage Plus](preview.png)
 
 <p align="center">
   <img src="preview-full.png" alt="Usage panel with session, weekly, model and history breakdowns" width="49%">
@@ -48,6 +48,11 @@ optional collectors:
 Requires Omarchy with Quickshell plugin support. The plugin has no other
 runtime dependency; optional collector setup is documented in
 [collectors/README.md](collectors/README.md).
+
+In Settings, import existing Claude or Codex account directories (one or more
+paths, including a parent such as `~/.codex-t3/`), or add new accounts, and
+choose which account the bar launches. Opening either provider shows each
+account's limits. See [multi-account setup](docs/multi-account.md).
 
 The widget follows Omarchy's live theme. An optional traffic-light palette uses
 green, amber, and red for Healthy, Warn, and Critical meters. Notifications are

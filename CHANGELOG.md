@@ -4,13 +4,30 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-11-25
+
+### Changed
+
+- Renamed to **AI Agent Usage Plus** in the marketplace and widget picker. The
+  plugin id, install command and settings are unchanged.
+- The API cost card now leads with the "If billed by API" estimate, labels
+  every provider row as an estimate (or "Partial" / "No estimate") with its
+  period, and states that figures are published API rates, not a bill.
+
 ### Added
 
+- Multiple Claude and Codex accounts: import existing account directories or
+  add new ones in Settings, see each account's limits, and choose which account
+  the bar launches. See `docs/multi-account.md`.
 - Google Antigravity (`agy`) collector and provider mark: reads local CLI and IDE
   SQLite databases for token and session history, plus quota allowances from
   `agy -p /usage --output-format json`.
 
 ### Fixed
+
+- API cost estimates use current model prices, including GPT-5.6 cache writes
+  at 1.25 times the input rate, and per-metric cost tiles no longer truncate
+  their labels.
 
 - The Antigravity collector no longer opens a browser tab and steals focus on
   every refresh while signed out. `agy -p /usage` runs a real agent turn: when
