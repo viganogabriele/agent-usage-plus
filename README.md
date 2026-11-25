@@ -1,6 +1,6 @@
-# Agent Usage Plus
+# AI Agent Usage Plus
 
-![Agent Usage Plus](preview.png)
+![AI Agent Usage Plus](preview.png)
 
 <p align="center">
   <img src="preview-full.png" alt="Usage panel with session, weekly, model and history breakdowns" width="49%">
