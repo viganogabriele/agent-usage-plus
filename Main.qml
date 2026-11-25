@@ -316,6 +316,10 @@ Item {
     }
   }
 
+  // True while a collector run this widget started is in flight; the
+  // panel's refresh control spins on it.
+  readonly property bool updating: updateProcess.running
+
   function updateCommand(kind, agentIds) {
     var updateArgs = []
     var providers = settings && settings.providers ? settings.providers : {}

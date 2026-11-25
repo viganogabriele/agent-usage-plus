@@ -4,6 +4,32 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- Redesigned panel dashboard (the bar is unchanged, pixel for pixel):
+  - An overview card with a gauge for the fullest limit window (or prepaid
+    credit), a dot for how much of the window has elapsed, and a plain verdict
+    — *Plenty of room*, *On pace*, *Running hot*, *Almost out*, *Limit
+    reached* — with run-out and reset times.
+  - Window pace on every allowance row: a clock tick on the meter and "12%
+    ahead of pace" / "Out in 1h 20m at this rate". The projection is the
+    window's own average rate and is withheld for the first 5% of a window and
+    for windows whose length is unknown (`logic/insights.js`).
+  - Today, Prompts/7-day average, and Streak tiles, with today compared to the
+    7-day average.
+  - Provider chips ringed with each account's fullest meter, plus a status dot
+    for sign-in/endpoint problems, so the switcher doubles as an overview.
+  - A hero with a plan pill, "Updated … ago", and a one-click refresh button.
+  - Details: a six-week activity calendar heatmap with recorded total, 7-day
+    average and week-over-week change; a token-mix bar with cache hit share;
+    a smoothed, area-filled token trend with a hover guide and tooltips.
+
+### Fixed
+
+- Date labels under the token trend and the API-equivalent-by-day chart no
+  longer pile up at the left edge (a `Row` collapsed its hidden labels), and
+  the daily chart's dollar axis no longer elides values like `$216.…`.
+
 ## [2.3.0] - 2026-11-25
 
 ### Changed

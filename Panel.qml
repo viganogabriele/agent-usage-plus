@@ -14,6 +14,7 @@ import "logic/pace.js" as Pace
 import "logic/cost-analytics.js" as CostAnalytics
 import "logic/notifications.js" as Notify
 import "logic/meter-colors.js" as MeterColors
+import "logic/insights.js" as Insights
 
 Panel {
   id: root
@@ -172,6 +173,99 @@ Panel {
     var total = 0
     for (var i = 0; i < series.points.length; i++) total += Number(series.points[i].value || 0)
     return total
+  }
+
+  // ---------------------------------------------------------- insights
+  //
+  // Derived, read-only views over data the selected provider already
+  // reported (logic/insights.js): how each limit window is pacing against
+  // its own clock, and what the daily token history says. Nothing here
+  // triggers a collector run.
+  readonly property var activity: provider ? Insights.activityStats(provider.recentDays || [], todayDate()) : null
+  readonly property bool hasActivity: !!activity && activity.recordedDays > 0 && !!provider
+    && provider.hasLocalStats !== false
+  readonly property var heatmap: (expanded && provider)
+    ? Insights.heatmapGrid(provider.recentDays || [], todayDate(), 6) : null
+  readonly property var tokenMixData: (expanded && provider) ? Insights.tokenMix(provider.modelUsage || {}) : null
+  readonly property var headlinePace: headline ? Insights.windowPace(headline, nowMs) : null
+
+  function paceFor(window) {
+    return window ? Insights.windowPace(window, root.nowMs) : null
+  }
+
+  // One short phrase per window. A run-out that lands before the reset is
+  // the only case that earns the warning color; "ahead of pace" alone is
+  // information, not an alarm.
+  function paceText(pace) {
+    if (!pace) return ""
+    if (pace.used >= 1) return "Limit reached"
+    if (pace.runsOutInMs > 0) return "Out in " + root.formatDuration(pace.runsOutInMs) + " at this rate"
+    if (pace.status === "idle") return "Unused this window"
+    var points = Math.round(Math.abs(pace.delta) * 100)
+    if (pace.status === "on") return "On pace"
+    if (pace.status === "over") return points + "% ahead of pace"
+    return points + "% under pace"
+  }
+
+  function paceColor(pace) {
+    if (!pace) return root.dim
+    if (pace.used >= 1) return root.urgent
+    if (pace.runsOutInMs > 0) return root.warn
+    return root.dim
+  }
+
+  // The headline verdict for the gauge card: one plain sentence a person can
+  // act on, picked from the fullest window's own severity and pace.
+  readonly property var verdict: {
+    var w = root.headline
+    if (!w) {
+      if (root.balance && root.balance.funded > 0) {
+        if (root.balanceSeverity === "critical") return { title: "Credit running low", color: root.colorForSeverity("critical") }
+        if (root.balanceSeverity === "warn") return { title: "Credit getting low", color: root.warn }
+        return { title: "Credit healthy", color: root.foreground }
+      }
+      return null
+    }
+    var pace = root.headlinePace
+    if (w.percent >= 1) return { title: "Limit reached", color: root.urgent }
+    if (root.headlineSeverity === "critical") return { title: "Almost out", color: root.colorForSeverity("critical") }
+    if (pace && pace.runsOutInMs > 0) return { title: "Running hot", color: root.warn }
+    if (root.headlineSeverity === "warn") return { title: "Getting close", color: root.warn }
+    if (pace && pace.status === "over") return { title: "Ahead of pace", color: root.foreground }
+    if (pace && pace.status === "on") return { title: "On pace", color: root.foreground }
+    return { title: "Plenty of room", color: root.foreground }
+  }
+
+  readonly property string verdictDetail: {
+    var w = root.headline
+    if (!w) {
+      return root.balance && root.balance.funded > 0
+        ? root.formatMoney(root.balance.remaining, root.balance.currency) + " of "
+          + root.formatMoney(root.balance.funded, root.balance.currency) + " left"
+        : ""
+    }
+    var parts = []
+    var pace = root.headlinePace
+    if (pace && pace.runsOutInMs > 0 && w.percent < 1)
+      parts.push("Out in " + root.formatDuration(pace.runsOutInMs))
+    var resetMs = root.resetMsFor(w)
+    if (resetMs > 0) parts.push((w.percent >= 1 ? "Back in " : "Resets in ") + root.formatDuration(resetMs))
+    return parts.join(" · ")
+  }
+
+  // "Updated 4m ago" from the collector's own timestamp; blank when the
+  // record does not carry one, rather than implying it is live.
+  function updatedAgoText(p) {
+    var ms = p ? Date.parse(String(p.updatedAt || "")) : NaN
+    if (!isFinite(ms)) return ""
+    var age = root.nowMs - ms
+    if (age < 60000) return "Updated just now"
+    return "Updated " + root.formatDuration(age) + " ago"
+  }
+
+  function heatColor(level) {
+    if (level <= 0) return root.alpha(root.foreground, 0.07)
+    return root.alpha(Color.accent, [0, 0.28, 0.5, 0.75, 1][Math.max(0, Math.min(4, level))])
   }
 
   // User-configurable warn/critical cutoffs (percentage points, 0-100),
@@ -482,6 +576,16 @@ Panel {
 
   function formatUsd(value) {
     return Format.formatUsd(value)
+  }
+
+  // Axis ticks only need magnitude, and a fixed-width gutter cannot fit
+  // cents on a three-digit day: "$216" instead of an elided "$216.…".
+  function axisUsd(value) {
+    var n = Number(value)
+    if (!isFinite(n) || n <= 0) return "$0"
+    if (n >= 1000) return "$" + (n / 1000).toFixed(1) + "k"
+    if (n >= 10) return "$" + Math.round(n)
+    return "$" + n.toFixed(2)
   }
 
   function balanceDetailText(b) {
@@ -1617,58 +1721,27 @@ Panel {
           width: panelFlick.width
           spacing: Style.space(18)
 
-          // ---------- Hero: provider mark · name · plan ----------
-          PanelHero {
+          // ---------- Hero: provider mark · name · plan · actions ----------
+          Item {
             id: hero
             visible: !!root.provider
             width: parent.width
-            title: root.provider ? root.provider.providerName : ""
-            meta: root.heroMeta(root.provider)
-            foreground: root.foreground
-            fontFamily: root.fontFamily
+            implicitHeight: Math.max(heroTile.height, heroText.implicitHeight, heroActions.implicitHeight)
 
-            // Two distinct, separately-labeled controls rather than one
-            // overloaded toggle: the gear opens the settings form (issue
-            // 08), the chevron reveals the cross-provider data section
-            // (issue 07). They're mutually exclusive (see toggleExpanded/
-            // toggleSettings) so opening one never leaves the other's
-            // content stacked underneath, taking up scroll height nobody
-            // asked to see.
-            trailingControl: Component {
-              Row {
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.space(6)
+            Rectangle {
+              id: heroTile
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(46)
+              height: width
+              radius: Style.cornerRadius + Style.space(4)
+              color: root.alpha(Color.accent, 0.10)
+              border.width: 1
+              border.color: root.alpha(Color.accent, 0.28)
 
-                PanelActionButton {
-                  iconText: root.settingsOpen ? "󰁍" : "󰒓"
-                  tooltipText: root.settingsOpen ? "Back to usage (s)" : "Settings (s)"
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  size: Style.space(28)
-                  fontSize: Style.font.body
-                  bordered: true
-                  focusable: true
-                  onClicked: root.toggleSettings()
-                }
-
-                PanelActionButton {
-                  visible: !root.settingsOpen
-                  iconText: root.expanded ? "󰅃" : "󰅀"
-                  tooltipText: root.expanded ? "Hide details (e)" : "Show detailed history and all-provider models (e)"
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  size: Style.space(28)
-                  fontSize: Style.font.body
-                  bordered: true
-                  focusable: true
-                  onClicked: root.toggleExpanded()
-                }
-              }
-            }
-
-            iconComponent: Component {
               Item {
                 id: heroMark
+                anchors.centerIn: parent
                 property var candidates: root.iconCandidatesForProvider(root.provider, root.surface)
                 // Provider objects are rebuilt on every refresh, which churns the
                 // array's identity without changing its content. Restart the fallback
@@ -1680,8 +1753,8 @@ Panel {
                 property real iconScale: root.iconScaleForProvider(root.provider)
                 onCandidatesKeyChanged: candidateIndex = 0
 
-                width: Style.font.display
-                height: Style.font.display
+                width: Style.space(28)
+                height: width
 
                 Image {
                   id: heroMarkImage
@@ -1710,6 +1783,118 @@ Panel {
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.display
                 }
+              }
+            }
+
+            Column {
+              id: heroText
+              anchors.left: heroTile.right
+              anchors.leftMargin: Style.space(12)
+              anchors.right: heroActions.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(5)
+
+              Text {
+                width: parent.width
+                text: root.provider ? root.provider.providerName : ""
+                textFormat: Text.PlainText
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Math.round(Style.font.subtitle * 1.25)
+                font.bold: true
+                elide: Text.ElideRight
+              }
+
+              Row {
+                spacing: Style.space(8)
+                width: parent.width
+
+                Rectangle {
+                  id: planPill
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: planPillText.implicitWidth + Style.space(12)
+                  height: planPillText.implicitHeight + Style.space(4)
+                  radius: height / 2
+                  color: root.alpha(Color.accent, 0.14)
+
+                  Text {
+                    id: planPillText
+                    anchors.centerIn: parent
+                    text: root.heroMeta(root.provider)
+                    textFormat: Text.PlainText
+                    color: Color.accent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    font.capitalization: Font.AllUppercase
+                    font.letterSpacing: 0.6
+                  }
+                }
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Math.max(0, parent.width - planPill.width - parent.spacing)
+                  text: root.updatedAgoText(root.provider)
+                  textFormat: Text.PlainText
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideRight
+                }
+              }
+            }
+
+            // Three separate, labeled controls rather than one overloaded
+            // toggle: refresh runs the collectors now, the gear opens the
+            // settings form, the chevron reveals Details. Settings and
+            // Details are mutually exclusive (see toggleExpanded/
+            // toggleSettings) so one never stacks under the other.
+            Row {
+              id: heroActions
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(6)
+
+              PanelActionButton {
+                id: refreshAction
+                visible: !root.settingsOpen
+                iconText: "󰑐"
+                tooltipText: usage.updating ? "Refreshing…" : "Refresh now (r)"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                size: Style.space(28)
+                fontSize: Style.font.body
+                bordered: true
+                // Shows the hover fill while a collector run is in flight.
+                hasCursor: usage.updating
+                focusable: true
+                onClicked: root.refreshNow()
+              }
+
+              PanelActionButton {
+                iconText: root.settingsOpen ? "󰁍" : "󰒓"
+                tooltipText: root.settingsOpen ? "Back to usage (s)" : "Settings (s)"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                size: Style.space(28)
+                fontSize: Style.font.body
+                bordered: true
+                focusable: true
+                onClicked: root.toggleSettings()
+              }
+
+              PanelActionButton {
+                visible: !root.settingsOpen
+                iconText: root.expanded ? "󰅃" : "󰅀"
+                tooltipText: root.expanded ? "Hide details (e)" : "Show activity, trends and models (e)"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                size: Style.space(28)
+                fontSize: Style.font.body
+                bordered: true
+                focusable: true
+                onClicked: root.toggleExpanded()
               }
             }
           }
@@ -1791,8 +1976,8 @@ Panel {
             width: parent.width
             spacing: Style.space(6)
             readonly property real chipSize: Math.max(
-              Style.space(32),
-              Math.min(Style.space(42),
+              Style.space(36),
+              Math.min(Style.space(44),
                 (width - spacing * Math.max(0, root.providers.length - 1))
                   / Math.max(1, root.providers.length)))
             readonly property int columnCount: Math.max(1, Math.min(root.providers.length,
@@ -1903,12 +2088,41 @@ Panel {
                   }
                 }
 
+                // Each chip carries its account's fullest meter as a ring, so
+                // the switcher is also a glance at every subscription.
+                ChipRing {
+                  anchors.centerIn: parent
+                  width: parent.width - Style.space(4)
+                  height: width
+                  visible: value >= 0
+                  value: {
+                    var percent = root.providerPercent(providerChip.modelData)
+                    return percent >= 0 ? root.displayPercent(percent) : -1
+                  }
+                  color: root.colorForSeverity(root.providerWorstSeverity(providerChip.modelData))
+                }
+
                 ProviderMark {
                   anchors.centerIn: parent
-                  width: Math.min(parent.width - Style.space(10), Style.space(24))
+                  width: Math.min(parent.width - Style.space(16), Style.space(22))
                   height: width
                   provider: providerChip.modelData
                   opacity: providerChip.selected || providerChip.hasCursor ? 1.0 : 0.82
+                }
+
+                // A problem state (sign-in missing, endpoint down) gets a
+                // small amber/red dot, so it is visible without selecting.
+                Rectangle {
+                  visible: String(providerChip.modelData && providerChip.modelData.usageStatusText || "") !== ""
+                  anchors.right: parent.right
+                  anchors.top: parent.top
+                  anchors.margins: Style.space(2)
+                  width: Style.space(8)
+                  height: width
+                  radius: width / 2
+                  color: root.statusColor(providerChip.modelData)
+                  border.width: 1
+                  border.color: root.surface
                 }
 
                 onClicked: {
@@ -2013,10 +2227,200 @@ Panel {
               }
             }
 
-          // ---------- Balance / limits ----------
-          PanelSeparator {
-            visible: balanceSection.visible || limitsSection.visible || detailModelSection.visible || costSection.visible
-            foreground: root.foreground
+          // ---------- Overview: gauge + verdict ----------
+          // The one-second answer: how full is the window that will stop the
+          // next prompt, is it outrunning its own clock, and when does it
+          // come back. Everything below is the supporting detail.
+          BorderSurface {
+            id: overviewCard
+            visible: !root.settingsOpen && !!root.provider && !!root.verdict
+            width: parent.width
+            implicitHeight: overviewRow.implicitHeight + Style.space(28)
+            color: root.alpha(root.foreground, 0.035)
+            borderSpec: Border.flat(root.alpha(Color.accent, 0.22), 1)
+            radius: Style.cornerRadius + Style.space(2)
+
+            readonly property bool hasWindow: !!root.headline
+            readonly property real gaugeValue: hasWindow
+              ? root.displayPercent(root.headline.percent)
+              : (root.balance && root.balance.funded > 0 ? root.clamp(root.balance.remaining / root.balance.funded, 0, 1) : 0)
+            readonly property string gaugeSeverity: hasWindow ? root.headlineSeverity : root.balanceSeverity
+
+            Rectangle {
+              anchors.fill: parent
+              anchors.margins: 1
+              radius: parent.radius
+              gradient: Gradient {
+                orientation: Gradient.Horizontal
+                GradientStop { position: 0; color: root.alpha(Color.accent, 0.09) }
+                GradientStop { position: 0.6; color: root.alpha(Color.accent, 0.0) }
+              }
+            }
+
+            Row {
+              id: overviewRow
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(14)
+              anchors.rightMargin: Style.space(14)
+              spacing: Style.space(16)
+
+              Item {
+                id: gaugeBox
+                width: Style.space(112)
+                height: width
+
+                RingGauge {
+                  anchors.fill: parent
+                  value: overviewCard.gaugeValue
+                  marker: root.headlinePace ? root.displayPercent(root.headlinePace.elapsed) : -1
+                  color: root.colorForSeverity(overviewCard.gaugeSeverity)
+                  thickness: Style.space(10)
+                }
+
+                Column {
+                  anchors.centerIn: parent
+                  spacing: Style.space(1)
+
+                  Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: overviewCard.hasWindow
+                      ? Format.formatPercent(root.headline.percent, usage.showAvailablePercentage)
+                      : Math.round(overviewCard.gaugeValue * 100) + "%"
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Math.round(Style.font.display * 1.05)
+                    font.bold: true
+                  }
+
+                  Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: overviewCard.hasWindow
+                      ? (usage.showAvailablePercentage ? "left" : "used")
+                      : "credit left"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+              }
+
+              Column {
+                width: overviewRow.width - gaugeBox.width - overviewRow.spacing
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(6)
+
+                Text {
+                  width: parent.width
+                  text: overviewCard.hasWindow ? String(root.headline.title || "Limit") : "Prepaid credit"
+                  textFormat: Text.PlainText
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.capitalization: Font.AllUppercase
+                  font.letterSpacing: 0.8
+                  elide: Text.ElideRight
+                }
+
+                Text {
+                  width: parent.width
+                  text: root.verdict ? root.verdict.title : ""
+                  textFormat: Text.PlainText
+                  color: root.verdict ? root.verdict.color : root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Math.round(Style.font.subtitle * 1.35)
+                  font.bold: true
+                  elide: Text.ElideRight
+                }
+
+                Text {
+                  visible: text !== ""
+                  width: parent.width
+                  text: root.verdictDetail
+                  textFormat: Text.PlainText
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+
+                // Explains the dot on the gauge in the same breath.
+                Row {
+                  visible: !!root.headlinePace
+                  spacing: Style.space(6)
+
+                  Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(7)
+                    height: width
+                    radius: width / 2
+                    color: root.foreground
+                  }
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.headlinePace
+                      ? Math.round(root.headlinePace.elapsed * 100) + "% of the window has passed"
+                      : ""
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+              }
+            }
+          }
+
+          // ---------- Today at a glance ----------
+          Row {
+            id: todayTiles
+            visible: !root.settingsOpen && root.hasActivity
+            width: parent.width
+            spacing: Style.space(8)
+            readonly property real tileWidth: (width - spacing * 2) / 3
+            readonly property real todayTokens: root.provider && Number(root.provider.todayTotalTokens) > 0
+              ? Number(root.provider.todayTotalTokens) : (root.activity ? root.activity.today : 0)
+            readonly property bool promptStats: !!root.provider && root.provider.hasPromptStats !== false
+
+            StatTile {
+              width: todayTiles.tileWidth
+              glyph: "󱐋"
+              label: "Today"
+              valueText: usage.formatTokenCount(todayTiles.todayTokens)
+              hint: root.activity && root.activity.todayVsAvg !== null
+                ? Insights.formatChange(root.activity.todayVsAvg) + " vs 7d avg" : "tokens"
+              hintColor: root.activity && root.activity.todayVsAvg !== null && root.activity.todayVsAvg > 0.5
+                ? Color.accent : root.dim
+              tooltipText: root.activity && root.activity.avg7 >= 0
+                ? "Tokens today · 7-day average " + usage.formatTokenCount(Math.round(root.activity.avg7)) + "/day"
+                : "Tokens today"
+            }
+
+            StatTile {
+              width: todayTiles.tileWidth
+              glyph: todayTiles.promptStats ? "󰍪" : "󰄧"
+              label: todayTiles.promptStats ? "Prompts" : "7-day avg"
+              valueText: todayTiles.promptStats
+                ? String(Number(root.provider ? root.provider.todayPrompts : 0) || 0)
+                : (root.activity && root.activity.avg7 >= 0 ? usage.formatTokenCount(Math.round(root.activity.avg7)) : "—")
+              hint: todayTiles.promptStats
+                ? (Number(root.provider ? root.provider.todaySessions : 0) || 0) + " sessions today"
+                : "tokens per day"
+            }
+
+            StatTile {
+              width: todayTiles.tileWidth
+              glyph: "󰈸"
+              glyphColor: root.activity && root.activity.streak >= 3 ? root.warn : Color.accent
+              label: "Streak"
+              valueText: root.activity
+                ? root.activity.streak + (root.activity.streak === 1 ? " day" : " days") : "—"
+              hint: root.activity && root.activity.best
+                ? "Best " + usage.formatTokenCount(root.activity.best.value) + " · " + root.shortHistoryDate(root.activity.best.date)
+                : ""
+              tooltipText: "Consecutive days with recorded usage"
+            }
           }
 
           BorderSurface {
@@ -2043,11 +2447,10 @@ Panel {
               anchors.rightMargin: Style.space(14)
               spacing: Style.space(10)
 
-              PanelSectionHeader {
+              CardTitle {
                 width: parent.width
+                glyph: "󰯝"
                 text: "Prepaid balance"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
               }
 
               Item {
@@ -2114,11 +2517,11 @@ Panel {
               anchors.rightMargin: Style.space(14)
               spacing: Style.space(10)
 
-              PanelSectionHeader {
+              CardTitle {
                 width: parent.width
+                glyph: "󰓅"
                 text: "Allowance"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
+                note: root.limits.length > 1 ? root.limits.length + " windows" : ""
               }
 
               Repeater {
@@ -2131,6 +2534,591 @@ Panel {
                 }
               }
             }
+          }
+
+          // ---------- Activity calendar (Details) ----------
+          // Six weeks of the selected provider's daily tokens as a calendar
+          // heatmap: rows are weeks, columns Monday..Sunday. A day outside
+          // the collector's record is drawn hollow, never as a quiet zero.
+          BorderSurface {
+            id: activityCard
+            visible: root.expanded && !root.settingsOpen && root.hasActivity && !!root.heatmap
+            width: parent.width
+            implicitHeight: activityContent.implicitHeight + Style.space(28)
+            color: root.alpha(root.foreground, 0.035)
+            borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+            radius: Style.cornerRadius
+
+            Column {
+              id: activityContent
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(14)
+              anchors.rightMargin: Style.space(14)
+              spacing: Style.space(10)
+
+              CardTitle {
+                width: parent.width
+                glyph: "󰸘"
+                text: "Activity"
+                note: root.activity ? root.activity.activeDays + " active of " + root.activity.recordedDays + " days" : ""
+              }
+
+              Row {
+                width: parent.width
+                spacing: Style.space(4)
+                readonly property real cellWidth: (width - spacing * 6) / 7
+
+                Repeater {
+                  model: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+                  Text {
+                    required property var modelData
+                    width: parent.cellWidth
+                    text: modelData
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+              }
+
+              Column {
+                width: parent.width
+                spacing: Style.space(4)
+
+                Repeater {
+                  model: root.heatmap ? root.heatmap.weeks : []
+
+                  Row {
+                    id: heatWeek
+                    required property var modelData
+                    width: parent.width
+                    spacing: Style.space(4)
+                    readonly property real cellWidth: (width - spacing * 6) / 7
+
+                    Repeater {
+                      model: heatWeek.modelData
+
+                      Rectangle {
+                        id: heatCell
+                        required property var modelData
+                        width: heatWeek.cellWidth
+                        height: Style.space(22)
+                        radius: Math.min(Style.cornerRadius, Style.space(6))
+                        color: heatCell.modelData.future || heatCell.modelData.missing
+                          ? "transparent" : root.heatColor(heatCell.modelData.level)
+                        border.width: heatCell.modelData.today ? 2 : (heatCell.modelData.missing && !heatCell.modelData.future ? 1 : 0)
+                        border.color: heatCell.modelData.today ? root.foreground : root.alpha(root.foreground, 0.10)
+                        opacity: heatCell.modelData.future ? 0.0 : 1.0
+
+                        Text {
+                          anchors.centerIn: parent
+                          text: Number(String(heatCell.modelData.date).slice(8, 10))
+                          color: heatCell.modelData.level >= 3 ? root.surface : root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                          font.bold: heatCell.modelData.today
+                        }
+
+                        MouseArea {
+                          id: heatHover
+                          anchors.fill: parent
+                          hoverEnabled: !heatCell.modelData.future
+                          acceptedButtons: Qt.NoButton
+                        }
+
+                        PanelToolTip {
+                          visible: heatHover.containsMouse
+                          text: heatCell.modelData.missing
+                            ? root.shortHistoryDate(heatCell.modelData.date) + " · no record"
+                            : root.dayTooltip({ date: heatCell.modelData.date, messageCount: heatCell.modelData.value },
+                                heatCell.modelData.today)
+                          fontFamily: root.fontFamily
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+              Item {
+                width: parent.width
+                implicitHeight: heatLegend.implicitHeight
+
+                Row {
+                  id: heatLegend
+                  anchors.right: parent.right
+                  spacing: Style.space(4)
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Less"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Repeater {
+                    model: [0, 1, 2, 3, 4]
+
+                    Rectangle {
+                      required property int modelData
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: Style.space(10)
+                      height: width
+                      radius: Style.space(3)
+                      color: root.heatColor(modelData)
+                    }
+                  }
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "More"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                Text {
+                  anchors.left: parent.left
+                  anchors.verticalCenter: heatLegend.verticalCenter
+                  text: root.heatmap && root.heatmap.peak > 0
+                    ? "Peak " + usage.formatTokenCount(root.heatmap.peak) + " / day" : ""
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
+                readonly property real tileWidth: (width - spacing * 2) / 3
+
+                StatTile {
+                  width: parent.tileWidth
+                  label: "Recorded"
+                  valueText: root.activity ? usage.formatTokenCount(root.activity.total) : "—"
+                  hint: "tokens in view"
+                }
+
+                StatTile {
+                  width: parent.tileWidth
+                  label: "7-day avg"
+                  valueText: root.activity && root.activity.avg7 >= 0
+                    ? usage.formatTokenCount(Math.round(root.activity.avg7)) : "—"
+                  hint: "tokens / day"
+                }
+
+                StatTile {
+                  width: parent.tileWidth
+                  label: "Week vs last"
+                  valueText: root.activity && root.activity.weekChange !== null
+                    ? Insights.formatChange(root.activity.weekChange) : "—"
+                  hint: root.activity && root.activity.weekChange !== null
+                    ? (root.activity.weekChange >= 0 ? "busier week" : "quieter week") : "needs 14 days"
+                }
+              }
+            }
+          }
+
+          // ---------- Token mix (Details) ----------
+          // Where the tokens actually went: fresh input, output, and prompt
+          // cache traffic, with the cache hit share that explains why a
+          // "billion-token" month is mostly cheap cache reads.
+          BorderSurface {
+            id: tokenMixCard
+            visible: root.expanded && !root.settingsOpen && !!root.tokenMixData && root.tokenMixData.total > 0
+            width: parent.width
+            implicitHeight: tokenMixContent.implicitHeight + Style.space(28)
+            color: root.alpha(root.foreground, 0.035)
+            borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+            radius: Style.cornerRadius
+
+            readonly property var segments: {
+              var m = root.tokenMixData
+              if (!m || !(m.total > 0)) return []
+              return [
+                { label: "Cache read", value: m.cacheRead, color: Color.accent },
+                { label: "Cache write", value: m.cacheWrite, color: root.alpha(Color.accent, 0.45) },
+                { label: "Input", value: m.input, color: root.foreground },
+                { label: "Output", value: m.output, color: root.alpha(root.foreground, 0.45) }
+              ]
+            }
+
+            Column {
+              id: tokenMixContent
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(14)
+              anchors.rightMargin: Style.space(14)
+              spacing: Style.space(10)
+
+              CardTitle {
+                width: parent.width
+                glyph: "󱘲"
+                text: "Token mix"
+                note: root.tokenMixData && root.tokenMixData.cacheHitRate >= 0
+                  ? Math.round(root.tokenMixData.cacheHitRate * 100) + "% cache hit" : ""
+              }
+
+              Item {
+                width: parent.width
+                height: Style.space(12)
+                clip: true
+
+                Rectangle {
+                  anchors.fill: parent
+                  radius: height / 2
+                  color: root.track
+                }
+
+                Row {
+                  id: mixBar
+                  anchors.fill: parent
+                  spacing: 2
+
+                  Repeater {
+                    model: tokenMixCard.segments
+
+                    Rectangle {
+                      required property var modelData
+                      required property int index
+                      height: mixBar.height
+                      width: Math.max(0, (mixBar.width - mixBar.spacing * 3) * modelData.value
+                        / Math.max(1, root.tokenMixData ? root.tokenMixData.total : 1))
+                      radius: height / 2
+                      color: modelData.color
+                      visible: width >= 1
+                    }
+                  }
+                }
+              }
+
+              Grid {
+                width: parent.width
+                columns: 2
+                rowSpacing: Style.space(6)
+                columnSpacing: Style.space(12)
+
+                Repeater {
+                  model: tokenMixCard.segments
+
+                  Item {
+                    required property var modelData
+                    width: (tokenMixContent.width - Style.space(12)) / 2
+                    implicitHeight: mixLabel.implicitHeight
+
+                    Rectangle {
+                      id: mixSwatch
+                      anchors.left: parent.left
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: Style.space(8)
+                      height: width
+                      radius: width / 2
+                      color: modelData.color
+                    }
+
+                    Text {
+                      id: mixLabel
+                      anchors.left: mixSwatch.right
+                      anchors.leftMargin: Style.space(6)
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: modelData.label
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    Text {
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: usage.formatTokenCount(modelData.value) + " · "
+                        + Math.round(modelData.value / Math.max(1, root.tokenMixData ? root.tokenMixData.total : 1) * 100) + "%"
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // ---------- History chart (issue 13): all recorded days for the
+          // selected provider. The line makes the trend readable at a glance;
+          // the axis labels make the scale explicit instead of asking the
+          // viewer to infer it from bar height.
+          BorderSurface {
+            id: historyCard
+            visible: root.expanded && !root.settingsOpen
+            width: parent.width
+            implicitHeight: historySection.implicitHeight + Style.space(28)
+            color: root.alpha(root.foreground, 0.035)
+            borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+            radius: Style.cornerRadius
+
+          Column {
+            id: historySection
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: Style.space(14)
+            anchors.rightMargin: Style.space(14)
+            spacing: Style.spacing.md
+
+            CardTitle {
+              width: parent.width
+              glyph: "󰺓"
+              text: "Token trend"
+              note: root.historySeries && root.historySeries.ok
+                ? usage.formatTokenCount(root.historySeriesTotal(root.historySeries)) + " · "
+                  + root.historySeries.points.length + " days"
+                : ""
+            }
+
+            Text {
+              visible: !root.provider
+              width: parent.width
+              text: "Select a subscription above to see its history."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
+            }
+
+            Canvas {
+              id: historyCanvas
+              visible: !!(root.historySeries && root.historySeries.ok && root.historySeries.points.length > 0)
+              width: parent.width
+              height: Style.space(150)
+
+              readonly property real axisLeft: Style.space(46)
+              readonly property real axisRight: Style.space(8)
+              readonly property real axisTop: Style.space(10)
+              readonly property real axisBottom: Style.space(22)
+
+              property var series: root.historySeries
+              property color lineColor: Color.accent
+              property int hoverIndex: -1
+
+              onHoverIndexChanged: requestPaint()
+
+              onSeriesChanged: requestPaint()
+              onWidthChanged: requestPaint()
+              onHeightChanged: requestPaint()
+              onLineColorChanged: requestPaint()
+              onVisibleChanged: if (visible) requestPaint()
+
+              // Canvas paint code has no lint/type-check coverage the rest
+              // of this file gets and a thrown exception here can silently
+              // blank the whole panel rather than just this chart — the
+              // try/catch is a hard backstop, not decoration, and the
+              // early returns keep an empty/single-point series (or a
+              // still-resizing width/height of 0) from ever reaching the
+              // drawing math below.
+              onPaint: {
+                var ctx = getContext("2d")
+                try {
+                  ctx.clearRect(0, 0, width, height)
+
+                  var s = historyCanvas.series
+                  if (!s || !s.ok || !s.points || s.points.length === 0) return
+                  if (width <= 0 || height <= 0) return
+
+                  var points = s.points
+                  var n = points.length
+                  var left = historyCanvas.axisLeft
+                  var right = historyCanvas.axisRight
+                  var top = historyCanvas.axisTop
+                  var bottom = height - historyCanvas.axisBottom
+                  var plotWidth = width - left - right
+                  var plotHeight = bottom - top
+                  if (plotWidth <= 0 || plotHeight <= 0) return
+                  var peak = Math.max(0, Number(s.peak) || 0)
+                  var scale = peak > 0 ? peak : 1
+
+                  ctx.font = String(Style.font.caption) + "px " + root.fontFamily
+                  ctx.textAlign = "right"
+                  ctx.textBaseline = "middle"
+
+                  // Three quiet guides provide a real scale without turning
+                  // the chart into a grid. The labels use the same compact
+                  // token formatter as the rest of the panel.
+                  for (var level = 0; level <= 2; level++) {
+                    var fraction = level / 2
+                    var guideY = bottom - plotHeight * fraction
+                    ctx.strokeStyle = root.alpha(root.foreground, 0.14)
+                    ctx.lineWidth = 1
+                    ctx.beginPath()
+                    ctx.moveTo(left, guideY + 0.5)
+                    ctx.lineTo(width - right, guideY + 0.5)
+                    ctx.stroke()
+                    ctx.fillStyle = root.dim
+                    ctx.fillText(usage.formatTokenCount(Math.round(peak * fraction)), left - Style.space(7), guideY)
+                  }
+
+                  function pointX(index) {
+                    return n <= 1 ? left + plotWidth / 2 : left + plotWidth * index / (n - 1)
+                  }
+                  function pointY(point) {
+                    var value = Math.max(0, Number(point && point.value) || 0)
+                    return bottom - plotHeight * Math.min(1, value / scale)
+                  }
+
+                  var xs = []
+                  var ys = []
+                  for (var i = 0; i < n; i++) {
+                    xs.push(pointX(i))
+                    ys.push(pointY(points[i] || {}))
+                  }
+
+                  // A gently smoothed line (midpoint quadratic curves never
+                  // overshoot below zero) over a fading area fill.
+                  function tracePath() {
+                    ctx.moveTo(xs[0], ys[0])
+                    for (var k = 1; k < n; k++) {
+                      var mx = (xs[k - 1] + xs[k]) / 2
+                      var my = (ys[k - 1] + ys[k]) / 2
+                      ctx.quadraticCurveTo(xs[k - 1], ys[k - 1], mx, my)
+                    }
+                    ctx.lineTo(xs[n - 1], ys[n - 1])
+                  }
+
+                  var area = ctx.createLinearGradient(0, top, 0, bottom)
+                  area.addColorStop(0, root.alpha(historyCanvas.lineColor, 0.32))
+                  area.addColorStop(1, root.alpha(historyCanvas.lineColor, 0.0))
+                  ctx.fillStyle = area
+                  ctx.beginPath()
+                  tracePath()
+                  ctx.lineTo(xs[n - 1], bottom)
+                  ctx.lineTo(xs[0], bottom)
+                  ctx.closePath()
+                  ctx.fill()
+
+                  ctx.strokeStyle = historyCanvas.lineColor
+                  ctx.lineWidth = 2
+                  ctx.lineCap = "round"
+                  ctx.lineJoin = "round"
+                  ctx.beginPath()
+                  tracePath()
+                  ctx.stroke()
+
+                  if (historyCanvas.hoverIndex >= 0 && historyCanvas.hoverIndex < n) {
+                    var hx = Math.round(xs[historyCanvas.hoverIndex]) + 0.5
+                    ctx.strokeStyle = root.alpha(root.foreground, 0.35)
+                    ctx.lineWidth = 1
+                    ctx.beginPath()
+                    ctx.moveTo(hx, top)
+                    ctx.lineTo(hx, bottom)
+                    ctx.stroke()
+                    ctx.fillStyle = historyCanvas.lineColor
+                    ctx.beginPath()
+                    ctx.arc(xs[historyCanvas.hoverIndex], ys[historyCanvas.hoverIndex], 4, 0, Math.PI * 2)
+                    ctx.fill()
+                  }
+
+                  // Mark the busiest day and the latest one; zero-usage days
+                  // stay visible as the line touching the baseline.
+                  var peakIndex = 0
+                  for (var j = 1; j < n; j++)
+                    if (Number(points[j].value || 0) > Number(points[peakIndex].value || 0)) peakIndex = j
+                  var marks = peakIndex === n - 1 ? [n - 1] : [peakIndex, n - 1]
+                  for (var m = 0; m < marks.length; m++) {
+                    var idx = marks[m]
+                    ctx.fillStyle = root.surface
+                    ctx.beginPath()
+                    ctx.arc(xs[idx], ys[idx], 5, 0, Math.PI * 2)
+                    ctx.fill()
+                    ctx.fillStyle = idx === n - 1 ? root.foreground : historyCanvas.lineColor
+                    ctx.beginPath()
+                    ctx.arc(xs[idx], ys[idx], 3.5, 0, Math.PI * 2)
+                    ctx.fill()
+                  }
+                } catch (e) {
+                  // Swallow: a chart that fails to draw should leave a
+                  // blank strip, not take the rest of the panel down.
+                }
+              }
+
+              MouseArea {
+                id: historyHover
+                anchors.fill: parent
+                hoverEnabled: true
+                acceptedButtons: Qt.NoButton
+                onExited: historyCanvas.hoverIndex = -1
+                onPositionChanged: function(mouse) {
+                  var s = historyCanvas.series
+                  var count = s && s.points ? s.points.length : 0
+                  var plot = historyCanvas.width - historyCanvas.axisLeft - historyCanvas.axisRight
+                  if (count === 0 || plot <= 0) { historyCanvas.hoverIndex = -1; return }
+                  var t = (mouse.x - historyCanvas.axisLeft) / plot
+                  historyCanvas.hoverIndex = count <= 1 ? 0 : Math.round(root.clamp(t, 0, 1) * (count - 1))
+                }
+              }
+
+              PanelToolTip {
+                visible: historyHover.containsMouse && historyCanvas.hoverIndex >= 0
+                text: {
+                  var s = historyCanvas.series
+                  var point = s && s.points ? s.points[historyCanvas.hoverIndex] : null
+                  return point ? root.dayTooltip({ date: point.date, messageCount: point.value },
+                    String(point.date) === root.todayDate()) : ""
+                }
+                fontFamily: root.fontFamily
+              }
+            }
+
+            // Labels sit under their own data points (same x as the
+            // chart's pointX), positioned explicitly: a Row collapses the
+            // hidden in-between labels and piles the visible ones up.
+            Item {
+              id: historyLabels
+              visible: !!(root.historySeries && root.historySeries.ok && root.historySeries.points.length > 0)
+              width: parent.width
+              height: Style.space(14)
+
+              Repeater {
+                model: root.historySeries && root.historySeries.points ? root.historySeries.points : []
+
+                Text {
+                  required property var modelData
+                  required property int index
+                  readonly property int count: root.historySeries && root.historySeries.points
+                    ? root.historySeries.points.length : 0
+                  readonly property real plotWidth: historyLabels.width - historyCanvas.axisLeft - historyCanvas.axisRight
+                  readonly property real pointX: count <= 1
+                    ? historyCanvas.axisLeft + plotWidth / 2
+                    : historyCanvas.axisLeft + plotWidth * index / (count - 1)
+                  x: root.clamp(pointX - implicitWidth / 2, 0, Math.max(0, historyLabels.width - implicitWidth))
+                  visible: index === 0 || index === count - 1
+                    || (count > 2 && index === Math.floor((count - 1) / 2))
+                  text: root.shortHistoryDate(modelData.date)
+                  color: index === count - 1 ? root.foreground : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+            }
+
+            Text {
+              visible: !!(root.historySeries && !root.historySeries.ok)
+              width: parent.width
+              text: root.historyUnavailableText(root.historySeries)
+              textFormat: Text.PlainText
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
+            }
+          }
           }
 
           // ---------- Token usage by model ----------
@@ -2155,11 +3143,10 @@ Panel {
               anchors.rightMargin: Style.space(14)
               spacing: Style.space(10)
 
-              PanelSectionHeader {
+              CardTitle {
                 width: parent.width
+                glyph: "󰘚"
                 text: "Token use by model"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
               }
 
               Item {
@@ -2232,11 +3219,10 @@ Panel {
                 anchors.rightMargin: Style.space(14)
                 spacing: Style.space(8)
 
-                PanelSectionHeader {
+                CardTitle {
                   width: parent.width
+                  glyph: "󰀏"
                   text: "All providers"
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
                 }
 
                 Text {
@@ -2428,11 +3414,11 @@ Panel {
                 anchors.rightMargin: Style.space(18)
                 spacing: Style.space(14)
 
-                PanelSectionHeader {
+                CardTitle {
                   width: parent.width
-                  text: "If billed by API" + (root.cost && root.cost.period ? " · " + root.cost.period : "")
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
+                  glyph: "󰄔"
+                  text: "If billed by API"
+                  note: root.cost && root.cost.period ? String(root.cost.period) : ""
                 }
 
                 Text {
@@ -2550,13 +3536,12 @@ Panel {
                           width: costDailyChart.axisLeft - Style.space(8)
                           height: Style.space(14)
                           y: -height / 2
-                          text: root.formatUsd(costDailyChart.peak * modelData)
+                          text: root.axisUsd(costDailyChart.peak * modelData)
                           textFormat: Text.PlainText
                           color: root.dim
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.caption
                           horizontalAlignment: Text.AlignRight
-                          elide: Text.ElideRight
                         }
 
                         Rectangle {
@@ -2610,7 +3595,10 @@ Panel {
                       }
                     }
 
-                    Row {
+                    // Positioned items, not a Row: a Row collapses its
+                    // invisible children, which stacked the three visible
+                    // dates on top of each other at the left edge.
+                    Item {
                       id: costDailyLabels
                       x: costDailyChart.axisLeft
                       y: costDailyChart.height - height
@@ -2623,7 +3611,9 @@ Panel {
                         Text {
                           required property var modelData
                           required property int index
-                          width: costDailyLabels.width / Math.max(1, root.costDailyRows.length)
+                          readonly property real slot: costDailyLabels.width / Math.max(1, root.costDailyRows.length)
+                          x: root.clamp(index * slot + slot / 2 - implicitWidth / 2, 0,
+                            Math.max(0, costDailyLabels.width - implicitWidth))
                           visible: index === 0 || index === root.costDailyRows.length - 1
                             || (root.costDailyRows.length > 2
                               && index === Math.floor((root.costDailyRows.length - 1) / 2))
@@ -2632,8 +3622,6 @@ Panel {
                           color: index === root.costDailyRows.length - 1 ? root.foreground : root.dim
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.caption
-                          horizontalAlignment: Text.AlignHCenter
-                          elide: Text.ElideRight
                         }
                       }
                     }
@@ -2883,203 +3871,6 @@ Panel {
               visible: root.allModels.length === 0
               width: parent.width
               text: "No model usage yet across enabled subscriptions."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              horizontalAlignment: Text.AlignHCenter
-              wrapMode: Text.WordWrap
-            }
-          }
-
-          // ---------- History chart (issue 13): all recorded days for the
-          // selected provider. The line makes the trend readable at a glance;
-          // the axis labels make the scale explicit instead of asking the
-          // viewer to infer it from bar height.
-          PanelSeparator {
-            visible: root.expanded
-            foreground: root.foreground
-          }
-
-          Column {
-            id: historySection
-            visible: root.expanded
-            width: parent.width
-            spacing: Style.spacing.md
-
-            PanelSectionHeader {
-              width: parent.width
-              text: "History"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Text {
-              visible: !root.provider
-              width: parent.width
-              text: "Select a subscription above to see its history."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              horizontalAlignment: Text.AlignHCenter
-              wrapMode: Text.WordWrap
-            }
-
-            Text {
-              visible: !!(root.historySeries && root.historySeries.ok)
-              width: parent.width
-              text: root.historySeries
-                ? root.historySeries.points.length + " recorded days · "
-                  + usage.formatTokenCount(root.historySeriesTotal(root.historySeries)) + " tokens"
-                : ""
-              textFormat: Text.PlainText
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-            }
-
-            Canvas {
-              id: historyCanvas
-              visible: !!(root.historySeries && root.historySeries.ok && root.historySeries.points.length > 0)
-              width: parent.width
-              height: Style.space(146)
-
-              readonly property real axisLeft: Style.space(46)
-              readonly property real axisRight: Style.space(8)
-              readonly property real axisTop: Style.space(10)
-              readonly property real axisBottom: Style.space(22)
-
-              property var series: root.historySeries
-              property color lineColor: Color.accent
-
-              onSeriesChanged: requestPaint()
-              onWidthChanged: requestPaint()
-              onHeightChanged: requestPaint()
-              onLineColorChanged: requestPaint()
-              onVisibleChanged: if (visible) requestPaint()
-
-              // Canvas paint code has no lint/type-check coverage the rest
-              // of this file gets and a thrown exception here can silently
-              // blank the whole panel rather than just this chart — the
-              // try/catch is a hard backstop, not decoration, and the
-              // early returns keep an empty/single-point series (or a
-              // still-resizing width/height of 0) from ever reaching the
-              // drawing math below.
-              onPaint: {
-                var ctx = getContext("2d")
-                try {
-                  ctx.clearRect(0, 0, width, height)
-
-                  var s = historyCanvas.series
-                  if (!s || !s.ok || !s.points || s.points.length === 0) return
-                  if (width <= 0 || height <= 0) return
-
-                  var points = s.points
-                  var n = points.length
-                  var left = historyCanvas.axisLeft
-                  var right = historyCanvas.axisRight
-                  var top = historyCanvas.axisTop
-                  var bottom = height - historyCanvas.axisBottom
-                  var plotWidth = width - left - right
-                  var plotHeight = bottom - top
-                  if (plotWidth <= 0 || plotHeight <= 0) return
-                  var peak = Math.max(0, Number(s.peak) || 0)
-                  var scale = peak > 0 ? peak : 1
-
-                  ctx.font = String(Style.font.caption) + "px " + root.fontFamily
-                  ctx.textAlign = "right"
-                  ctx.textBaseline = "middle"
-
-                  // Three quiet guides provide a real scale without turning
-                  // the chart into a grid. The labels use the same compact
-                  // token formatter as the rest of the panel.
-                  for (var level = 0; level <= 2; level++) {
-                    var fraction = level / 2
-                    var guideY = bottom - plotHeight * fraction
-                    ctx.strokeStyle = root.alpha(root.foreground, 0.14)
-                    ctx.lineWidth = 1
-                    ctx.beginPath()
-                    ctx.moveTo(left, guideY + 0.5)
-                    ctx.lineTo(width - right, guideY + 0.5)
-                    ctx.stroke()
-                    ctx.fillStyle = root.dim
-                    ctx.fillText(usage.formatTokenCount(Math.round(peak * fraction)), left - Style.space(7), guideY)
-                  }
-
-                  function pointX(index) {
-                    return n <= 1 ? left + plotWidth / 2 : left + plotWidth * index / (n - 1)
-                  }
-                  function pointY(point) {
-                    var value = Math.max(0, Number(point && point.value) || 0)
-                    return bottom - plotHeight * Math.min(1, value / scale)
-                  }
-
-                  ctx.strokeStyle = historyCanvas.lineColor
-                  ctx.lineWidth = 2
-                  ctx.lineCap = "round"
-                  ctx.lineJoin = "round"
-                  ctx.beginPath()
-                  for (var i = 0; i < n; i++) {
-                    var linePoint = points[i] || {}
-                    var lineX = pointX(i)
-                    var lineY = pointY(linePoint)
-                    if (i === 0) ctx.moveTo(lineX, lineY)
-                    else ctx.lineTo(lineX, lineY)
-                  }
-                  ctx.stroke()
-
-                  // A small dot preserves zero-usage days and makes the
-                  // latest point easy to find without filled histogram bars.
-                  for (var j = 0; j < n; j++) {
-                    var point = points[j] || {}
-                    ctx.fillStyle = String(point.date || "") === root.todayDate()
-                      ? root.foreground : historyCanvas.lineColor
-                    ctx.beginPath()
-                    ctx.arc(pointX(j), pointY(point), j === n - 1 ? 3.5 : 2.5, 0, Math.PI * 2)
-                    ctx.fill()
-                  }
-                } catch (e) {
-                  // Swallow: a chart that fails to draw should leave a
-                  // blank strip, not take the rest of the panel down.
-                }
-              }
-            }
-
-            Row {
-              id: historyLabels
-              visible: !!(root.historySeries && root.historySeries.ok && root.historySeries.points.length > 0)
-              width: parent.width
-
-              Repeater {
-                model: root.historySeries && root.historySeries.points ? root.historySeries.points : []
-
-                Text {
-                  required property var modelData
-                  required property int index
-                  width: historyLabels.width / Math.max(1,
-                    root.historySeries && root.historySeries.points
-                      ? root.historySeries.points.length : 1)
-                  visible: {
-                    var count = root.historySeries && root.historySeries.points
-                      ? root.historySeries.points.length : 0
-                    return index === 0 || index === count - 1
-                      || (count > 2 && index === Math.floor((count - 1) / 2))
-                  }
-                  text: root.shortHistoryDate(modelData.date)
-                  horizontalAlignment: Text.AlignHCenter
-                  color: root.historySeries && root.historySeries.points
-                    && index === root.historySeries.points.length - 1
-                    ? root.foreground : root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-              }
-            }
-
-            Text {
-              visible: !!(root.historySeries && !root.historySeries.ok)
-              width: parent.width
-              text: root.historyUnavailableText(root.historySeries)
-              textFormat: Text.PlainText
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -4027,12 +4818,281 @@ Panel {
     }
   }
 
-  // A limit window: label and percentage, meter, and reset countdown.
+  // ------------------------------------------------------- dashboard parts
+
+  // A 270° gauge, open at the bottom: the fullest limit window at a glance.
+  // `marker` is where the window's clock stands (same 0-1 scale as value),
+  // drawn as a small dot on the track so "used vs elapsed" reads without a
+  // second number.
+  component RingGauge: Canvas {
+    id: ring
+    property real value: 0
+    property real marker: -1
+    property color color: root.foreground
+    property color trackColor: root.track
+    property color markerColor: root.foreground
+    property real thickness: Style.space(9)
+    property real shownValue: 0
+
+    Behavior on shownValue {
+      NumberAnimation { duration: 650; easing.type: Easing.OutCubic }
+    }
+    Component.onCompleted: shownValue = Qt.binding(function() { return root.clamp(ring.value, 0, 1) })
+
+    onShownValueChanged: requestPaint()
+    onMarkerChanged: requestPaint()
+    onColorChanged: requestPaint()
+    onTrackColorChanged: requestPaint()
+    onWidthChanged: requestPaint()
+    onHeightChanged: requestPaint()
+    onVisibleChanged: if (visible) requestPaint()
+
+    onPaint: {
+      var ctx = getContext("2d")
+      try {
+        ctx.reset()
+        if (width <= 0 || height <= 0) return
+        var r = Math.min(width, height) / 2 - ring.thickness / 2 - 1
+        if (r <= 0) return
+        var cx = width / 2
+        var cy = height / 2
+        var start = Math.PI * 0.75
+        var sweep = Math.PI * 1.5
+        ctx.lineCap = "round"
+        ctx.lineWidth = ring.thickness
+
+        ctx.strokeStyle = ring.trackColor
+        ctx.beginPath()
+        ctx.arc(cx, cy, r, start, start + sweep, false)
+        ctx.stroke()
+
+        if (ring.shownValue > 0.001) {
+          var end = start + sweep * ring.shownValue
+          // A soft wider underlay reads as a glow without a blur pass.
+          ctx.strokeStyle = Qt.rgba(ring.color.r, ring.color.g, ring.color.b, 0.18)
+          ctx.lineWidth = ring.thickness + Style.space(6)
+          ctx.beginPath()
+          ctx.arc(cx, cy, r, start, end, false)
+          ctx.stroke()
+
+          var gradient = ctx.createLinearGradient(cx - r, cy + r, cx + r, cy - r)
+          gradient.addColorStop(0, Qt.rgba(ring.color.r, ring.color.g, ring.color.b, 0.55))
+          gradient.addColorStop(1, ring.color)
+          ctx.strokeStyle = gradient
+          ctx.lineWidth = ring.thickness
+          ctx.beginPath()
+          ctx.arc(cx, cy, r, start, end, false)
+          ctx.stroke()
+        }
+
+        if (ring.marker >= 0) {
+          var angle = start + sweep * root.clamp(ring.marker, 0, 1)
+          var mx = cx + Math.cos(angle) * r
+          var my = cy + Math.sin(angle) * r
+          ctx.fillStyle = root.surface
+          ctx.beginPath()
+          ctx.arc(mx, my, ring.thickness * 0.42 + 1.5, 0, Math.PI * 2)
+          ctx.fill()
+          ctx.fillStyle = ring.markerColor
+          ctx.beginPath()
+          ctx.arc(mx, my, ring.thickness * 0.42, 0, Math.PI * 2)
+          ctx.fill()
+        }
+      } catch (e) {
+        // A gauge that fails to paint leaves an empty square, never a
+        // broken panel.
+      }
+    }
+  }
+
+  // Thin full-circle progress ring drawn around a provider chip's mark, so
+  // the switcher doubles as an every-account overview.
+  component ChipRing: Canvas {
+    id: chipRing
+    property real value: -1
+    property color color: root.foreground
+    property real thickness: Math.max(2, Style.space(2.5))
+
+    onValueChanged: requestPaint()
+    onColorChanged: requestPaint()
+    onWidthChanged: requestPaint()
+    onHeightChanged: requestPaint()
+    onVisibleChanged: if (visible) requestPaint()
+
+    onPaint: {
+      var ctx = getContext("2d")
+      try {
+        ctx.reset()
+        if (width <= 0 || height <= 0) return
+        var r = Math.min(width, height) / 2 - chipRing.thickness / 2 - 0.5
+        var cx = width / 2
+        var cy = height / 2
+        ctx.lineWidth = chipRing.thickness
+        ctx.lineCap = "round"
+        ctx.strokeStyle = root.alpha(root.foreground, 0.10)
+        ctx.beginPath()
+        ctx.arc(cx, cy, r, 0, Math.PI * 2, false)
+        ctx.stroke()
+        if (chipRing.value > 0.001) {
+          ctx.strokeStyle = chipRing.color
+          ctx.beginPath()
+          ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * root.clamp(chipRing.value, 0, 1), false)
+          ctx.stroke()
+        }
+      } catch (e) {
+      }
+    }
+  }
+
+  // A compact number card: glyph + label, a large value, and a one-line hint.
+  component StatTile: BorderSurface {
+    id: statTile
+    property string glyph: ""
+    property string label: ""
+    property string valueText: ""
+    property string hint: ""
+    property color hintColor: root.dim
+    property color glyphColor: Color.accent
+    property string tooltipText: ""
+
+    implicitHeight: tileContent.implicitHeight + Style.space(20)
+    color: root.alpha(root.foreground, 0.035)
+    borderSpec: Border.flat(root.alpha(root.foreground, 0.10), 1)
+    radius: Style.cornerRadius
+
+    Column {
+      id: tileContent
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(8)
+      spacing: Style.space(3)
+
+      Row {
+        spacing: Style.space(5)
+        width: parent.width
+
+        Text {
+          visible: statTile.glyph !== ""
+          anchors.verticalCenter: parent.verticalCenter
+          text: statTile.glyph
+          color: statTile.glyphColor
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          width: parent.width - x
+          text: statTile.label
+          textFormat: Text.PlainText
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.capitalization: Font.AllUppercase
+          font.letterSpacing: 0.6
+          elide: Text.ElideRight
+        }
+      }
+
+      Text {
+        width: parent.width
+        text: statTile.valueText
+        textFormat: Text.PlainText
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Math.round(Style.font.subtitle * 1.3)
+        font.bold: true
+        elide: Text.ElideRight
+      }
+
+      Text {
+        visible: statTile.hint !== ""
+        width: parent.width
+        text: statTile.hint
+        textFormat: Text.PlainText
+        color: statTile.hintColor
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
+    }
+
+    MouseArea {
+      id: tileHover
+      anchors.fill: parent
+      hoverEnabled: statTile.tooltipText !== ""
+      acceptedButtons: Qt.NoButton
+    }
+
+    PanelToolTip {
+      visible: tileHover.containsMouse && statTile.tooltipText !== ""
+      text: statTile.tooltipText
+      fontFamily: root.fontFamily
+    }
+  }
+
+  // Section card title: an accent glyph, an uppercase caption, and an
+  // optional right-aligned note.
+  component CardTitle: Item {
+    id: cardTitle
+    property string glyph: ""
+    property string text: ""
+    property string note: ""
+
+    implicitHeight: Math.max(cardTitleLabel.implicitHeight, cardTitleNote.implicitHeight)
+
+    Row {
+      anchors.left: parent.left
+      anchors.right: cardTitleNote.left
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(6)
+
+      Text {
+        visible: cardTitle.glyph !== ""
+        anchors.verticalCenter: parent.verticalCenter
+        text: cardTitle.glyph
+        color: Color.accent
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+      }
+
+      Text {
+        id: cardTitleLabel
+        anchors.verticalCenter: parent.verticalCenter
+        text: cardTitle.text
+        textFormat: Text.PlainText
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        font.bold: true
+        font.capitalization: Font.AllUppercase
+        font.letterSpacing: 0.8
+      }
+    }
+
+    Text {
+      id: cardTitleNote
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      text: cardTitle.note
+      textFormat: Text.PlainText
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+  }
+
+  // A limit window: label and percentage, meter with the window's clock
+  // marked on it, reset countdown, and how the window is pacing.
   component LimitRow: Column {
     id: limitRow
     property var window: null
 
     readonly property string severity: window ? root.severityForPercent(window.percent) : "ok"
+    readonly property var pace: root.paceFor(window)
     // Only providers that report an explicit quota get this. A percentage
     // meter alone cannot be turned into a token burn projection honestly.
     readonly property var paceProjection: Pace.projectExhaustion(
@@ -4065,9 +5125,10 @@ Panel {
         text: limitRow.window && limitRow.window.percent >= 0
           ? Format.formatPercent(limitRow.window.percent, usage.showAvailablePercentage)
           : "n/a"
-        color: root.foreground
+        color: limitRow.severity === "ok" ? root.foreground : root.colorForSeverity(limitRow.severity)
         font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
+        font.pixelSize: Style.font.body
+        font.bold: true
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
       }
@@ -4077,26 +5138,51 @@ Panel {
       width: parent.width
       value: limitRow.window && limitRow.window.percent >= 0
         ? root.displayPercent(limitRow.window.percent) : -1
+      // Where the clock stands in this window: fill past the tick means the
+      // allowance is going faster than time is.
+      marker: limitRow.pace ? root.displayPercent(limitRow.pace.elapsed) : -1
       severity: limitRow.severity
     }
 
-    Text {
-      id: resetText
+    Item {
       width: parent.width
-      text: {
-        var remainingMs = root.resetMsFor(limitRow.window)
-        return remainingMs > 0 ? "Resets in " + root.formatDuration(remainingMs) : ""
+      implicitHeight: Math.max(resetText.implicitHeight, paceLabel.implicitHeight)
+      visible: resetText.text !== "" || paceLabel.text !== ""
+
+      Text {
+        id: resetText
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        text: {
+          var remainingMs = root.resetMsFor(limitRow.window)
+          return remainingMs > 0 ? "Resets in " + root.formatDuration(remainingMs) : ""
+        }
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
       }
-      color: root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
+
+      Text {
+        id: paceLabel
+        anchors.right: parent.right
+        anchors.left: resetText.right
+        anchors.leftMargin: Style.space(8)
+        anchors.verticalCenter: parent.verticalCenter
+        horizontalAlignment: Text.AlignRight
+        text: root.paceText(limitRow.pace)
+        textFormat: Text.PlainText
+        color: root.paceColor(limitRow.pace)
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideLeft
+      }
     }
 
     Text {
       visible: !!limitRow.paceProjection && limitRow.paceProjection.exhaustsBeforeReset
       width: parent.width
       text: (limitRow.paceProjection && limitRow.paceProjection.exhaustsBeforeReset)
-        ? "At this pace: exhausted in " + root.formatDuration(limitRow.paceProjection.untilExhaustionMs) : ""
+        ? "Token trend: exhausted in " + root.formatDuration(limitRow.paceProjection.untilExhaustionMs) : ""
       textFormat: Text.PlainText
       color: root.foreground
       font.family: root.fontFamily
@@ -4104,12 +5190,14 @@ Panel {
     }
   }
 
-  // Rounded track showing the percentage of the allowance used.
+  // Rounded track showing the percentage of the allowance used, with an
+  // optional tick for where the window's clock stands.
   component Meter: Item {
     id: meter
     property real value: -1
+    property real marker: -1
     property string severity: "ok"
-    property real thickness: Math.max(Style.space(4), Math.round(Style.spacing.controlHeight * 0.14))
+    property real thickness: Math.max(Style.space(6), Math.round(Style.spacing.controlHeight * 0.2))
 
     implicitHeight: thickness
 
@@ -4126,13 +5214,28 @@ Panel {
       height: meterTrack.height
       radius: meterTrack.radius
       width: meterTrack.width * root.clamp(meter.value, 0, 1)
-      color: root.colorForSeverity(meter.severity)
+      gradient: Gradient {
+        orientation: Gradient.Horizontal
+        GradientStop { position: 0; color: root.alpha(root.colorForSeverity(meter.severity), 0.6) }
+        GradientStop { position: 1; color: root.colorForSeverity(meter.severity) }
+      }
 
       Behavior on width {
-        NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+        NumberAnimation { duration: 420; easing.type: Easing.OutCubic }
       }
     }
 
+    Rectangle {
+      visible: meter.marker >= 0
+      x: Math.round(meterTrack.width * root.clamp(meter.marker, 0, 1)) - width / 2
+      anchors.verticalCenter: meterTrack.verticalCenter
+      width: Math.max(2, Style.space(2))
+      height: meterTrack.height + Style.space(6)
+      radius: width / 2
+      color: root.foreground
+      border.width: 1
+      border.color: root.surface
+    }
   }
 
   // One row per day: label, bar, tokens. Today is picked out in full

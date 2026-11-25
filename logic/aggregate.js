@@ -517,6 +517,10 @@ function mergeProviderDisplay(record, stats, aggregateMeta) {
     hasLocalStats: synced ? (stats.hasLocalStats !== false) : (record.hasLocalStats !== false),
     hasPromptStats: synced ? (stats.hasPromptStats !== false) : (record.hasPromptStats !== false),
 
+    // The collector's own last-run timestamp, for the panel's "updated …
+    // ago" line. A free-form string here; the panel parses it defensively.
+    updatedAt: sanitizeDisplayText(record.updatedAt, 40),
+
     syncEnabled: synced,
     syncDeviceCount: deviceCount,
     syncUpdatedAt: meta.updatedAt || ""

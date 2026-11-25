@@ -67,7 +67,8 @@ test("panel guards optional cost values before evaluating a hidden card", () => 
 })
 
 test("panel displays the collector cost period next to the estimate", () => {
-  assert.match(readCostCard(), /"If billed by API"\s*\+\s*\(root\.cost\s*&&\s*root\.cost\.period/)
+  // The period rides in the card title's right-aligned note.
+  assert.match(readCostCard(), /text: "If billed by API"\s*\n\s*note:\s*root\.cost\s*&&\s*root\.cost\.period/)
 })
 
 test("cost details keep the partial disclosure neutral, singular, and only shown when actionable", () => {
