@@ -54,6 +54,9 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- One date convention across the panel: spans as "3d 5h", moments as
+  "today 18:40" / "Fri 09:00" / "Wed 2 Dec 09:00", calendar days as "20 Nov"
+  (was "11/20"), English names and a 24-hour clock regardless of locale.
 - Panel cards and controls keep a soft minimum corner radius (12px cards,
   8px controls, pill switches) even when Hyprland's window rounding is 0,
   instead of turning into hard boxes; the bar is untouched.

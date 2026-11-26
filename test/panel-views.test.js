@@ -57,7 +57,7 @@ test("each window's reset is stated once, under its own ring", () => {
   assert.doesNotMatch(overview, /model: overviewCard\.ringCount === 2 \? root\.ringWindows/)
   // Free resets live in the Usage view, not in the overview.
   assert.doesNotMatch(overview, /resetCredits/)
-  assert.match(block("id: freeResetsCard", "id: balanceSection"), /days left/)
+  assert.match(block("id: freeResetsCard", "id: balanceSection"), /formatDuration\(ms\) \+ " left"/)
 })
 
 test("ring and chart colors stay on the theme accent until a threshold says otherwise", () => {

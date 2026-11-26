@@ -358,7 +358,7 @@ Panel {
     return best
   }
 
-  // The reset as a wall-clock moment, in the locale's own time format:
+  // The reset as a wall-clock moment, 24-hour like every time in the panel:
   // "today 18:40", "tomorrow 09:00", "Fri 09:00", or a date further out.
   function resetClock(w) {
     var ms = w ? Date.parse(String(w.resetAt || "")) : NaN
@@ -367,19 +367,16 @@ Panel {
   }
 
   // A moment split into its day ("today", "tomorrow", "Fri", "Wed 2 Dec")
-  // and its clock time in the locale's own short format, minus seconds.
+  // and its 24-hour clock time ("18:40").
   function momentParts(ms) {
     if (!isFinite(ms)) return { day: "", clock: "" }
     var at = new Date(ms)
     var now = new Date(root.nowMs)
-    var format = String(Qt.locale().timeFormat(Locale.ShortFormat)).replace(/[:.]ss/, "").replace(/\s*t$/, "")
-    var clock = Qt.formatTime(at, format)
+    var clock = Qt.formatTime(at, "HH:mm")
     var startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
     var dayOffset = Math.floor((new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime() - startOfToday) / 86400000 + 0.5)
     var day = dayOffset <= 0 ? "today" : (dayOffset === 1 ? "tomorrow"
-      : (dayOffset < 7 ? Qt.locale().dayName(at.getDay(), Locale.ShortFormat)
-        : Qt.locale().dayName(at.getDay(), Locale.ShortFormat) + " " + at.getDate() + " "
-          + Qt.locale().monthName(at.getMonth(), Locale.ShortFormat)))
+      : (dayOffset < 7 ? root.weekdayNames[at.getDay()] : root.dateLabel(at, true)))
     return { day: day, clock: clock }
   }
 
@@ -871,16 +868,26 @@ Panel {
       + "-" + String(now.getDate()).padStart(2, "0")
   }
 
+  // One date convention for the whole panel: "20 Nov", or "Fri 20 Nov"
+  // with the weekday; spans are always formatDuration ("3d 5h"); moments
+  // near now read "today", "tomorrow" or a weekday (momentParts).
+  readonly property var weekdayNames: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+  readonly property var monthNames: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+  function dateLabel(at, withWeekday) {
+    return (withWeekday ? root.weekdayNames[at.getDay()] + " " : "") + at.getDate() + " " + root.monthNames[at.getMonth()]
+  }
+
   function dayName(date) {
     var parsed = new Date(String(date || "") + "T00:00:00")
     if (isNaN(parsed.getTime())) return String(date || "")
-    return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][parsed.getDay()]
+    return root.weekdayNames[parsed.getDay()]
   }
 
   function shortHistoryDate(date) {
     var parsed = new Date(String(date || "") + "T00:00:00")
     if (isNaN(parsed.getTime())) return String(date || "")
-    return (parsed.getMonth() + 1) + "/" + parsed.getDate()
+    return root.dateLabel(parsed, false)
   }
 
   function unpricedModelText(cost) {
@@ -976,7 +983,7 @@ Panel {
     var parsed = new Date(String(day.date) + "T00:00:00")
     var label = isNaN(parsed.getTime())
       ? String(day.date)
-      : dayName(day.date) + " " + (parsed.getMonth() + 1) + "/" + parsed.getDate()
+      : root.dateLabel(parsed, true)
     var text = label + " · " + usage.formatTokenCount(Number(day.messageCount || 0)) + " tokens"
     // Prompt and session counts only exist for today, so they ride along here
     // instead of taking a section of their own. Billing-API agents never
@@ -2548,9 +2555,10 @@ Panel {
               valueText: root.hasActivity
                 ? root.activity.streak + (root.activity.streak === 1 ? " day" : " days") : "—"
               hint: root.activity && root.activity.best
-                ? "Best " + usage.formatTokenCount(root.activity.best.value) + " · " + root.shortHistoryDate(root.activity.best.date)
-                : ""
-              tooltipText: "Consecutive days with recorded usage"
+                ? "Best day " + usage.formatTokenCount(root.activity.best.value) : ""
+              tooltipText: "Consecutive days with recorded usage" + (root.activity && root.activity.best
+                ? " · best day " + root.dateLabel(new Date(String(root.activity.best.date) + "T00:00:00"), true)
+                  + ", " + usage.formatTokenCount(root.activity.best.value) + " tokens" : "")
             }
           }
 
@@ -2593,8 +2601,7 @@ Panel {
               text: {
                 var ms = freeResetsCard.expiresMs
                 if (!(ms > 0)) return ""
-                var days = Math.floor(ms / 86400000)
-                return days >= 1 ? days + (days === 1 ? " day left" : " days left") : root.formatDuration(ms) + " left"
+                return root.formatDuration(ms) + " left"
               }
               color: freeResetsCard.expiresMs > 0 && freeResetsCard.expiresMs < 2 * 86400000 ? root.warnText : root.dim
               font.family: root.fontFamily
