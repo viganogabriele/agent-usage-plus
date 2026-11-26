@@ -14,9 +14,12 @@ All notable changes to this project are documented in this file. The format is b
     the outlook at the current rate ("Runs out 39m before reset" or "~88%
     used by reset"); hovering a ring gives the exact run-out time. A dot on
     the ring marks how much of the window has elapsed.
-  - Free resets the provider granted and you can still redeem (Codex's
-    `resetCredits` from Omarchy's collector): how many, where to redeem them
-    and when the next one expires, under the rings and on each account row.
+  - Free resets the provider granted and you can still redeem: how many,
+    where to redeem them and when the next one expires, under the rings and
+    on each account row. Codex's come from Omarchy's collector; Claude's are
+    read by the new `omarchy-agent-usage-claude-compat`, which opts Omarchy's
+    own usage request in to Anthropic's `cedar_ember` block, keeps no grant
+    identifiers, and falls back to Omarchy's updater if it fails.
   - Four views under the overview — Usage, Activity, Models, Cost — instead
     of one long Details scroll; `e` steps through them, and a view with
     nothing to show says why.

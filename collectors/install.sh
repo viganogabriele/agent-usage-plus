@@ -58,7 +58,7 @@ cp -a "$(dirname "$source_root")/scripts/calculate-api-cost" "$data_root/scripts
 cp -a "$(dirname "$source_root")/logic/cost.js" "$(dirname "$source_root")/logic/api-price-catalogue.js" "$data_root/logic/"
 chmod 0755 "$data_root/bin/agent-usage-plus-collectors" "$data_root/bin/agent-usage-plus-accounts" "$data_root/bin/omarchy-agent-usage-openrouter" "$data_root/bin/omarchy-agent-usage-deepseek" "$data_root/bin/omarchy-agent-usage-xai" "$data_root/bin/omarchy-agent-usage-zai" "$data_root/bin/omarchy-agent-usage-gemini" "$data_root/bin/omarchy-agent-usage-cursor" "$data_root/bin/omarchy-agent-usage-devin" "$data_root/bin/omarchy-agent-usage-kimi" "$data_root/bin/omarchy-agent-usage-opencode-go" "$data_root/bin/omarchy-agent-usage-agy" "$data_root/bin/omarchy-agent-usage-claude-cost" "$data_root/bin/omarchy-agent-usage-codex-cost" "$data_root/scripts/calculate-api-cost"
 chmod 0755 "$data_root/bin/agent-usage-plus-update"
-chmod 0755 "$data_root/bin/omarchy-agent-usage-codex-compat" "$data_root/bin/omarchy-agent-usage-update"
+chmod 0755 "$data_root/bin/omarchy-agent-usage-codex-compat" "$data_root/bin/omarchy-agent-usage-claude-compat" "$data_root/bin/omarchy-agent-usage-update"
 
 if $codex_cli_compat; then
   user_bin=${XDG_BIN_HOME:-"$HOME/.local/bin"}

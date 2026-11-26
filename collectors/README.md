@@ -102,6 +102,38 @@ that the plugin prefers, never edits `/usr/share/omarchy`, and refuses to
 replace another local override. The updater delegates every provider except
 Codex to Omarchy's packaged command.
 
+## Claude free resets
+
+Claude grants saved full resets of its rate limits ("Reset for free" in
+claude.ai Settings › Usage). Anthropic reports them only in a `cedar_ember`
+block that the OAuth usage response includes when the request opts in with
+`?cedar_ember=1`. `omarchy-agent-usage-claude-compat` runs Omarchy's own
+Claude collector unchanged except for two runtime hooks: its usage request
+gains that query (with Claude Code's `claude-cli/<version> (external, cli)`
+user agent), and is retried once exactly as Omarchy sent it if Anthropic
+answers 400 or a 403 that isn't about the `user:profile` scope; the emitted
+record gains `resetCredits: {available, nextExpiresAt}`, the same shape
+Omarchy's Codex collector reports.
+
+- It reads no credentials itself: the request, token included, is the one
+  Omarchy's code built.
+- Only grants that are eligible, not paused, started, unexpired and well
+  formed count. More than 50 resets or 200 grant records shows none.
+- Grant identifiers and labels are never kept. The only cache,
+  `$XDG_CACHE_HOME/agent-usage-plus/claude-reset-credits-<hash>.json` (one per
+  Claude config directory, mode 0600), holds each available reset's expiry,
+  so a run where Omarchy reuses recent limits still shows the count and an
+  expired reset drops out on time.
+- Omarchy's own multi-account mode probes several logins in one run; those
+  answers can't be matched to records safely, so that mode shows none.
+
+The plugin's updater publishes Claude through this reader (or through
+`omarchy-agent-usage-claude-cost`, which runs it, when
+`--with-transcript-cost` is installed). If the reader fails, Omarchy's
+packaged updater refreshes Claude instead, so Claude never goes blank. Set
+`AGENT_USAGE_PLUS_CLAUDE_COLLECTOR=` (empty) to leave Claude entirely to
+Omarchy.
+
 ## Claude and Codex API-cost estimates
 
 `omarchy-agent-usage-claude-cost` and `omarchy-agent-usage-codex-cost` run an
@@ -112,7 +144,7 @@ price is excluded from the subtotal and the resulting estimate is explicitly
 marked partial, never silently treated as zero.
 
 Run either wrapper directly to inspect the resulting record. The Claude
-wrapper defaults to Omarchy's packaged scanner. For Codex or a custom scanner,
+wrapper runs Omarchy's packaged scanner through the free-reset reader above. For Codex or a custom scanner,
 point it at the preserved base executable:
 
 ```bash

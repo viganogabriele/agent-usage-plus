@@ -63,7 +63,7 @@ test("plugin refresh uses the Codex compatibility updater without a separate ins
       AGENT_USAGE_PLUS_CODEX_COLLECTOR: codex },
   })
   assert.deepEqual(fs.readFileSync(calls, "utf8").trim().split("\n").sort(),
-    ["codex:--force", "packaged:--except codex --force codex --except devin --except agy"])
+    ["codex:--force", "packaged:--except codex --except claude --force codex --except devin --except agy"])
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, "state/omarchy/agents/usage/codex.json"))).limits[0].percent, 0.2)
 })
 
@@ -211,6 +211,8 @@ test("plugin updater reaches the real packaged updater through an installed --co
   executable(packaged, `printf 'packaged:%s\\n' "$*" >>"${calls}"`)
   executable(codex, `printf 'codex:%s\\n' "$*" >>"${calls}"; printf '%s\\n' '{"id":"codex","ready":true,"limits":[{"percent":0.1}]}'`)
   executable(bundled, `printf 'bundled:%s\\n' "$*" >>"${calls}"`)
+  const claude = path.join(root, "claude-collector")
+  executable(claude, `printf 'claude:%s\\n' "$*" >>"${calls}"; printf '%s\\n' '{"id":"claude","limits":[]}'`)
 
   execFileSync("bash", [installer, "--codex-cli-compat"], {
     env: { ...process.env, XDG_BIN_HOME: bin, XDG_DATA_HOME: data },
@@ -224,10 +226,50 @@ test("plugin updater reaches the real packaged updater through an installed --co
       AGENT_USAGE_PLUS_PACKAGED_UPDATER: packaged,
       AGENT_USAGE_PLUS_CODEX_COLLECTOR: codex,
       AGENT_USAGE_PLUS_BUNDLED_RUNNER: bundled,
+      AGENT_USAGE_PLUS_CLAUDE_COLLECTOR: claude,
     },
   })
 
   const lines = fs.readFileSync(calls, "utf8").trim().split("\n")
-  assert.ok(lines.includes("packaged:--except codex --force --except devin --except agy"))
+  assert.ok(lines.includes("packaged:--except codex --except claude --force --except devin --except agy"))
+  assert.ok(lines.includes("claude:--force"))
   assert.ok(lines.includes("codex:--force"))
+})
+
+function claudeHarness(args, claudeBody) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-usage-claude-"))
+  const packaged = path.join(root, "packaged-updater")
+  const codex = path.join(root, "codex-collector")
+  const claude = path.join(root, "claude-collector")
+  const calls = path.join(root, "calls")
+  executable(packaged, `printf 'packaged:%s\\n' "$*" >>"${calls}"`)
+  executable(codex, `printf '%s\\n' '{"id":"codex","limits":[]}'`)
+  executable(claude, `printf 'claude:%s\\n' "$*" >>"${calls}"; ${claudeBody}`)
+  execFileSync("bash", [updater, ...args], {
+    env: {
+      ...process.env,
+      OMARCHY_PATH: path.join(root, "no-omarchy"),
+      XDG_STATE_HOME: path.join(root, "state"),
+      AGENT_USAGE_PLUS_PACKAGED_UPDATER: packaged,
+      AGENT_USAGE_PLUS_CODEX_COLLECTOR: codex,
+      AGENT_USAGE_PLUS_CLAUDE_COLLECTOR: claude,
+    },
+  })
+  return { root, calls: fs.readFileSync(calls, "utf8").trim().split("\n").sort(),
+    record: path.join(root, "state", "omarchy", "agents", "usage", "claude.json") }
+}
+
+test("local updater publishes Claude through the free-reset reader", t => {
+  const result = claudeHarness(["--force", "claude"],
+    `printf '%s\\n' '{"id":"claude","limits":[],"resetCredits":{"available":1,"nextExpiresAt":""}}'`)
+  t.after(() => fs.rmSync(result.root, { recursive: true, force: true }))
+  assert.deepEqual(result.calls, ["claude:--force", "packaged:--except codex --except claude --force claude"])
+  assert.equal(JSON.parse(fs.readFileSync(result.record)).resetCredits.available, 1)
+})
+
+test("a failing Claude reader hands Claude back to the packaged updater", t => {
+  const result = claudeHarness(["--force"], "exit 3")
+  t.after(() => fs.rmSync(result.root, { recursive: true, force: true }))
+  assert.deepEqual(result.calls, ["claude:--force", "packaged:--except codex --except claude --force", "packaged:--force claude"])
+  assert.equal(fs.existsSync(result.record), false)
 })
