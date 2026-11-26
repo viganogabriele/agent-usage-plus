@@ -26,6 +26,7 @@ test("the panel offers exactly the Usage, Activity, Models and Cost views", () =
 test("every detail card belongs to exactly one view", () => {
   const expectations = {
     "id: todayTiles": "usage",
+    "id: freeResetsCard": "usage",
     "id: balanceSection": "usage",
     "id: limitsSection": "usage",
     "id: accountsCard": "usage",
@@ -54,7 +55,9 @@ test("each window's reset is stated once, under its own ring", () => {
   // Rings are fixed instances, not Repeater delegates rebuilt on refresh.
   const overview = block("id: overviewCard", "// ---------- View tabs")
   assert.doesNotMatch(overview, /model: overviewCard\.ringCount === 2 \? root\.ringWindows/)
-  assert.match(overview, /root\.provider\.resetCredits/)
+  // Free resets live in the Usage view, not in the overview.
+  assert.doesNotMatch(overview, /resetCredits/)
+  assert.match(block("id: freeResetsCard", "id: balanceSection"), /days left/)
 })
 
 test("ring and chart colors stay on the theme accent until a threshold says otherwise", () => {

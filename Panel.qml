@@ -2470,74 +2470,6 @@ Panel {
                 }
               }
 
-              // Free full resets the provider granted and you can still
-              // redeem: worth knowing before a limit bites.
-              Rectangle {
-                id: freeResets
-                readonly property var credits: root.provider ? root.provider.resetCredits : null
-                readonly property real expiresMs: credits ? Date.parse(String(credits.nextExpiresAt || "")) - root.nowMs : NaN
-                visible: !!credits && credits.available > 0
-                width: parent.width
-                height: Math.max(freeResetsText.implicitHeight, freeResetsExpiry.implicitHeight) + Style.space(16)
-                radius: root.controlRadius
-                color: root.alpha(Commons.Color.accent, 0.08)
-                border.width: 1
-                border.color: root.alpha(Commons.Color.accent, 0.24)
-
-                Text {
-                  id: freeResetsGlyph
-                  anchors.left: parent.left
-                  anchors.leftMargin: Style.space(10)
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: "󰑓"
-                  color: root.accentText
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.subtitle
-                }
-
-                Column {
-                  id: freeResetsText
-                  anchors.left: freeResetsGlyph.right
-                  anchors.leftMargin: Style.space(8)
-                  anchors.right: freeResetsExpiry.left
-                  anchors.rightMargin: Style.space(8)
-                  anchors.verticalCenter: parent.verticalCenter
-
-                  Text {
-                    width: parent.width
-                    elide: Text.ElideRight
-                    text: freeResets.credits ? freeResets.credits.available + " free reset"
-                      + (freeResets.credits.available === 1 ? "" : "s") + " to redeem" : ""
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    font.bold: true
-                  }
-
-                  Text {
-                    width: parent.width
-                    visible: text !== ""
-                    elide: Text.ElideRight
-                    text: root.redeemHint(root.provider)
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
-                }
-
-                Text {
-                  id: freeResetsExpiry
-                  anchors.right: parent.right
-                  anchors.rightMargin: Style.space(10)
-                  anchors.verticalCenter: parent.verticalCenter
-                  visible: text !== ""
-                  text: freeResets.expiresMs > 0 ? "expires in " + root.formatDuration(freeResets.expiresMs) : ""
-                  color: freeResets.expiresMs > 0 && freeResets.expiresMs < 2 * 86400000 ? root.warnText : root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-              }
-
               Text {
                 visible: overviewCard.creditOnly
                 width: parent.width
@@ -2619,6 +2551,67 @@ Panel {
                 ? "Best " + usage.formatTokenCount(root.activity.best.value) + " · " + root.shortHistoryDate(root.activity.best.date)
                 : ""
               tooltipText: "Consecutive days with recorded usage"
+            }
+          }
+
+          // Free full resets the provider granted and you can still redeem:
+          // how many and how long they last. Where to redeem is on hover.
+          BorderSurface {
+            id: freeResetsCard
+            readonly property var credits: root.provider ? root.provider.resetCredits : null
+            readonly property real expiresMs: credits ? Date.parse(String(credits.nextExpiresAt || "")) - root.nowMs : NaN
+            opacity: root.viewFade
+            visible: root.viewTab === "usage" && !root.settingsOpen && !!credits && credits.available > 0
+            width: parent.width
+            implicitHeight: Math.max(freeResetsCount.implicitHeight, freeResetsLeft.implicitHeight) + Style.space(24)
+            color: root.alpha(root.foreground, 0.035)
+            borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+            radius: root.cardRadius
+
+            Text {
+              id: freeResetsCount
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(14)
+              anchors.right: freeResetsLeft.left
+              anchors.rightMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              elide: Text.ElideRight
+              text: freeResetsCard.credits ? freeResetsCard.credits.available + " free reset"
+                + (freeResetsCard.credits.available === 1 ? "" : "s") : ""
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: true
+            }
+
+            Text {
+              id: freeResetsLeft
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(14)
+              anchors.verticalCenter: parent.verticalCenter
+              visible: text !== ""
+              text: {
+                var ms = freeResetsCard.expiresMs
+                if (!(ms > 0)) return ""
+                var days = Math.floor(ms / 86400000)
+                return days >= 1 ? days + (days === 1 ? " day left" : " days left") : root.formatDuration(ms) + " left"
+              }
+              color: freeResetsCard.expiresMs > 0 && freeResetsCard.expiresMs < 2 * 86400000 ? root.warnText : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            MouseArea {
+              id: freeResetsHover
+              anchors.fill: parent
+              hoverEnabled: true
+              acceptedButtons: Qt.NoButton
+            }
+
+            PanelToolTip {
+              visible: freeResetsHover.containsMouse && text !== ""
+              text: root.redeemHint(root.provider)
+              fontFamily: root.fontFamily
             }
           }
 
