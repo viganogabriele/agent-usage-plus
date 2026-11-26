@@ -71,7 +71,7 @@ test("ring and chart colors stay on the theme accent until a threshold says othe
 test("the all-providers list never truncates its labels into fixed columns", () => {
   const list = block("id: costProviderOverview", "// ---------- Settings:")
   assert.doesNotMatch(list, /width: Style\.space\((78|94)\)/)
-  assert.match(list, /id: providerCostKind[\s\S]*?anchors\.right: parent\.right/)
+  assert.match(list, /id: providerCostKind[\s\S]*?anchors\.right: providerCostApiValue\.left/)
   assert.doesNotMatch(list.slice(list.indexOf("id: providerCostKind"), list.indexOf("id: providerCostKind") + 700), /elide:/)
 })
 

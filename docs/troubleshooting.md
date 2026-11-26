@@ -30,13 +30,14 @@ The expanded Details view keeps the accounting labels separate:
 - **API credit left** is the real prepaid balance returned by a provider such
   as OpenRouter, DeepSeek, or xAI; when the provider reports funded/spent
   values, the hint shows both.
-- **If billed by API** is a published-rate equivalent of recorded tokens. It
+- **At API prices** is a published-rate equivalent of recorded tokens. It
   is available only when exact model/token pricing exists for that provider;
-  `—` means the data was not provided, not that the cost was zero.
+  "No API-price estimate" means the data was not provided, not that the cost
+  was zero.
 
-`Avg / recorded day` is the estimate divided by the collector's distinct
-active days when no per-day price matrix is available. The panel labels that
-fallback instead of drawing made-up daily bars.
+The "a day" figure is the estimate divided by the collector's distinct
+active days when no per-day price matrix is available; the panel then shows
+no daily bars rather than made-up ones.
 
 ## A provider is missing
 

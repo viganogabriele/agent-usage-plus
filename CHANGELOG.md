@@ -35,11 +35,9 @@ All notable changes to this project are documented in this file. The format is b
   - Activity: a smoothed, area-filled token trend with a hover guide, then a
     five-week calendar heatmap with recorded total, 7-day average and
     week-over-week change. Models: a token-mix bar with cache hit share and
-    per-model use. Cost: the selected account's API-rate estimate with "a
-    day" / "per 30 days" chips, a gradient daily chart and models as one
-    stacked bar in tonal steps of the accent; then ranked rows for the providers that have an
-    estimate, each with its share of the total, and one line naming the
-    rest — nothing cut to "Partial · A…".
+    per-model use. Cost: the selected account's API-rate estimate
+    with its daily pace, a daily bar chart and models as one stacked bar,
+    then the providers that have an estimate compared side by side.
   - Accounts of the selected provider as rows with a ring, reading, next
     reset and Use/Active.
 - Redesigned Settings at the panel's own width (it used to jump to twice
@@ -54,6 +52,12 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- The Cost view is plainer: "At API prices" with one figure, one pace line
+  ("$48.27 a day · $1,448.04 a month at this pace") and the fine print in a
+  tooltip; a light daily bar chart without an axis gutter; models as one
+  stacked bar; and "Compared" only when two or more providers have an
+  estimate. The boxed chips, catalogue/coverage captions and "No estimate:"
+  list are gone.
 - One date convention across the panel: spans as "3d 5h", moments as
   "today 18:40" / "Fri 09:00" / "Wed 2 Dec 09:00", calendar days as "20 Nov"
   (was "11/20"), English names and a 24-hour clock regardless of locale.

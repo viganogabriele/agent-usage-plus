@@ -202,7 +202,7 @@ would have cost billed à la carte.
 your collector computes by multiplying token counts by a price list you
 maintain yourself; it is never read from an actual invoice or billing
 API for a rate-limited plan (if it were, you'd be reporting `balance`
-instead). The panel labels this figure as an "If billed by API" equivalent
+instead). The panel labels this figure "At API prices" (published rates, not a bill)
 wherever it's shown, and your collector should do the same anywhere else it
 surfaces the number — never present it as "this is what you were charged."
 
