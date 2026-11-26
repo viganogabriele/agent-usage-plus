@@ -29,7 +29,6 @@ test("every detail card belongs to exactly one view", () => {
     "id: balanceSection": "usage",
     "id: limitsSection": "usage",
     "id: accountsCard": "usage",
-    "id: resetsCard": "usage",
     "id: activityCard": "activity",
     "id: historyCard": "activity",
     "id: tokenMixCard": "models",
@@ -45,21 +44,25 @@ test("every detail card belongs to exactly one view", () => {
   }
 })
 
-test("the overview leads with each window's reset and its forecast", () => {
-  const ring = block("component RingTile: Item {", "component ForecastLane")
-  assert.match(ring, /root\.formatDuration\(ringTile\.resetMs\)/)
-  assert.match(ring, /ringTile\.resetParts\.day \+ " " \+ ringTile\.resetParts\.clock/)
-  const lane = block("component ForecastLane: Item {", "component TabStrip")
-  assert.match(lane, /"Empties "/)
-  assert.match(lane, /before reset/)
+test("each window's reset is stated once, under its own ring", () => {
+  const ring = block("component RingTile: Item {", "component TabStrip")
+  assert.match(ring, /root\.formatDuration\(resetMs\)/)
+  assert.match(ring, /resetParts\.day \+ " " \+ resetParts\.clock/)
+  assert.match(ring, /" before reset"/)
+  // No second or third copy of the same reset elsewhere in the panel.
+  assert.doesNotMatch(source, /component ForecastLane|upcomingResets|id: resetsCard/)
   // Rings are fixed instances, not Repeater delegates rebuilt on refresh.
-  const overview = block("id: overviewCard", "// ---------- Upcoming resets")
+  const overview = block("id: overviewCard", "// ---------- View tabs")
   assert.doesNotMatch(overview, /model: overviewCard\.ringCount === 2 \? root\.ringWindows/)
+  assert.match(overview, /root\.provider\.resetCredits/)
 })
 
-test("the usage view lists upcoming resets across subscriptions", () => {
-  assert.match(source, /readonly property var upcomingResets:/)
-  assert.match(source, /id: resetsCard[\s\S]*?root\.viewTab === "usage"/)
+test("ring and chart colors stay on the theme accent until a threshold says otherwise", () => {
+  const tint = block("function ringTint(w) {", "\n  }")
+  assert.doesNotMatch(tint, /hslHue|Qt\.hsla/)
+  assert.match(tint, /severity !== "ok"/)
+  const series = block("function seriesColor(index) {", "\n  }")
+  assert.doesNotMatch(series, /hslHue|Qt\.hsla/)
 })
 
 test("the all-providers list never truncates its labels into fixed columns", () => {

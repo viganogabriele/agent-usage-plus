@@ -679,3 +679,16 @@ test("malformed dates and amounts never become dashboard readings", () => {
   assert.equal(Aggregate.balanceValue({ remaining: 0 }).remaining, 0)
   assert.equal(Aggregate.costValue({ estimateUsd: 0 }).estimateUsd, 0)
 })
+
+test("resetCreditsValue keeps only redeemable free resets", () => {
+  assert.deepEqual(Aggregate.resetCreditsValue({ available: 2, nextExpiresAt: "2026-12-10T22:00:00+00:00" }),
+    { available: 2, nextExpiresAt: "2026-12-10T22:00:00+00:00" })
+  assert.deepEqual(Aggregate.resetCreditsValue({ available: "1" }), { available: 1, nextExpiresAt: "" })
+  assert.deepEqual(Aggregate.resetCreditsValue({ available: 3, nextExpiresAt: "soon" }), { available: 3, nextExpiresAt: "" })
+  assert.equal(Aggregate.resetCreditsValue({ available: 500 }).available, 99)
+  for (const raw of [null, "2", {}, { available: 0 }, { available: -1 }, { available: "x" }, { available: true }])
+    assert.equal(Aggregate.resetCreditsValue(raw), null)
+  const merged = Aggregate.mergeProviderDisplay({ id: "codex", resetCredits: { available: 1 } }, null, {})
+  assert.deepEqual(merged.resetCredits, { available: 1, nextExpiresAt: "" })
+  assert.equal(Aggregate.mergeProviderDisplay({ id: "claude" }, null, {}).resetCredits, null)
+})

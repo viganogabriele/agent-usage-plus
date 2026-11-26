@@ -7,15 +7,16 @@ All notable changes to this project are documented in this file. The format is b
 ### Added
 
 - Redesigned panel dashboard (the bar is unchanged, pixel for pixel):
-  - An overview with Session and Weekly side by side as rings in their own
-    accent-derived tints (or the two fullest windows, or prepaid credit),
-    each with its reset as a pill — countdown and wall-clock time — and a
-    dot for how much of the window has elapsed. Under them, a forecast lane
-    per window drawn as time from start to reset: where now is, when it
-    empties at this rate, and how long before the reset that leaves you
-    blocked ("Empties tomorrow 00:36 · 39m before reset").
-  - Upcoming resets across every subscription, soonest first, with what each
-    hands back ("frees 64%", "unlocks").
+  - An overview with Session and Weekly side by side as rings in the theme
+    accent (or the two fullest windows, or prepaid credit); only the Warn and
+    Critical thresholds change a ring's color. Each window's reset is stated
+    once, under its own ring: "Resets in 2h 12m", the wall-clock time, and
+    the outlook at the current rate ("Runs out 39m before reset" or "~88%
+    used by reset"); hovering a ring gives the exact run-out time. A dot on
+    the ring marks how much of the window has elapsed.
+  - Free resets the provider granted and you can still redeem (Codex's
+    `resetCredits` from Omarchy's collector): how many, where to redeem them
+    and when the next one expires, under the rings and on each account row.
   - Four views under the overview — Usage, Activity, Models, Cost — instead
     of one long Details scroll; `e` steps through them, and a view with
     nothing to show says why.
@@ -33,7 +34,7 @@ All notable changes to this project are documented in this file. The format is b
     week-over-week change. Models: a token-mix bar with cache hit share and
     per-model use. Cost: the selected account's API-rate estimate with "a
     day" / "per 30 days" chips, a gradient daily chart and models as one
-    stacked, colored bar; then ranked rows for the providers that have an
+    stacked bar in tonal steps of the accent; then ranked rows for the providers that have an
     estimate, each with its share of the total, and one line naming the
     rest — nothing cut to "Partial · A…".
   - Accounts of the selected provider as rows with a ring, reading, next

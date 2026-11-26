@@ -180,6 +180,21 @@ function balanceValue(raw) {
   }
 }
 
+// Free full resets the provider has granted and the person can still
+// redeem (Codex's "rateLimitResetCredits", reported by Omarchy's collector
+// as { available, nextExpiresAt }). Per-account like `limits`; anything
+// malformed or empty reads as "none", never as an error.
+function resetCreditsValue(raw) {
+  if (!raw || typeof raw !== "object") return null
+  var available = Math.floor(strictNumber(raw.available))
+  if (!isFinite(available) || available < 1) return null
+  var expires = sanitizeDisplayText(raw.nextExpiresAt, 40)
+  return {
+    available: Math.min(available, 99),
+    nextExpiresAt: isFinite(Date.parse(expires)) ? expires : ""
+  }
+}
+
 // An optional, collector-reported *derived estimate* of what usage would
 // cost at published API rates (issue #12) — never a real ledger figure the
 // way `balance` is, which is why the panel always labels it as an estimate
@@ -536,6 +551,7 @@ function mergeProviderDisplay(record, stats, aggregateMeta) {
     limits: sanitizeLimits(record.limits),
     tierLabel: sanitizeDisplayText(record.tierLabel, 60),
     balance: balanceValue(record.balance),
+    resetCredits: resetCreditsValue(record.resetCredits),
     cost: costValue(record.cost),
 
     todayPrompts: synced ? numberValue(stats.todayPrompts) : numberValue(record.todayPrompts),
@@ -788,6 +804,7 @@ if (typeof module !== "undefined" && module.exports) {
     cloneValue: cloneValue,
     sanitizeDeviceId: sanitizeDeviceId,
     balanceValue: balanceValue,
+    resetCreditsValue: resetCreditsValue,
     costValue: costValue,
     dateString: dateString,
     recentDateStrings: recentDateStrings,

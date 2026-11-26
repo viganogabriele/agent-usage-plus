@@ -383,53 +383,29 @@ Panel {
     return { day: day, clock: clock }
   }
 
-  // Each ring gets its own hue, both drawn from the theme accent, so
-  // Session and Weekly read apart at a glance; Warn and Critical still take
-  // over, and the opt-in traffic-light palette keeps its green.
-  function ringTint(w, index) {
+  // Where a granted free reset is redeemed; the panel only reports them.
+  function redeemHint(p) {
+    var id = p ? String(p.providerId || "") : ""
+    if (id === "codex") return "Redeem with /usage in Codex"
+    if (id === "claude") return "Redeem in claude.ai Settings › Usage"
+    return ""
+  }
+
+  // A ring is drawn in the theme accent while it has room; only the
+  // Warn and Critical thresholds change its color (and the opt-in
+  // traffic-light palette keeps its green), so a color always means the
+  // same thing everywhere in the panel.
+  function ringTint(w) {
     var severity = w ? severityForPercent(w.percent) : "ok"
     if (severity !== "ok" || usage.colorfulUsageMeters) return colorForSeverity(severity)
-    var accent = Commons.Color.accent
-    if (index === 0) return accent
-    var hue = accent.hslHue < 0 ? 0.6 : accent.hslHue
-    return Qt.hsla((hue + 0.33) % 1, Math.max(0.45, accent.hslSaturation), clamp(accent.hslLightness, 0.45, 0.72), 1)
+    return Commons.Color.accent
   }
 
-  // A categorical palette walked around the hue wheel from the theme
-  // accent: distinct per series, still recognisably the theme's.
+  // Series in a chart are tonal steps of the theme accent rather than new
+  // hues, so no series ever reads as a warning color.
   function seriesColor(index) {
-    var accent = Commons.Color.accent
-    var hue = accent.hslHue < 0 ? 0.6 : accent.hslHue
-    if (index === 0) return accent
-    return Qt.hsla((hue + index * 0.17) % 1, Math.max(0.45, accent.hslSaturation),
-      clamp(accent.hslLightness, 0.48, 0.7), 1)
-  }
-
-  // Every enabled provider's current windows that hand room back, soonest
-  // first — the "can I switch to one that resets sooner?" list.
-  readonly property var upcomingResets: {
-    var rows = []
-    for (var i = 0; i < root.providers.length; i++) {
-      var p = root.providers[i]
-      var windows = limitWindows(p)
-      for (var j = 0; j < windows.length; j++) {
-        var inMs = resetMsFor(windows[j])
-        if (!(inMs > 0) || !(windows[j].percent > 0)) continue
-        var parts = momentParts(root.nowMs + inMs)
-        rows.push({
-          providerId: p.providerId,
-          providerName: p.providerName,
-          provider: p,
-          title: windows[j].title,
-          percent: windows[j].percent,
-          inMs: inMs,
-          day: parts.day,
-          clock: parts.clock
-        })
-      }
-    }
-    rows.sort(function(a, b) { return a.inMs - b.inMs })
-    return rows.slice(0, 5)
+    var steps = [1, 0.72, 0.5, 0.34, 0.22]
+    return root.alpha(Commons.Color.accent, steps[Math.max(0, index) % steps.length])
   }
 
   // Cards under the tabs fade in on a view change instead of popping.
@@ -2483,40 +2459,82 @@ Panel {
                   visible: overviewCard.ringCount >= 1
                   creditMode: overviewCard.creditOnly
                   window: !overviewCard.creditOnly && root.ringWindows.length > 0 ? root.ringWindows[0] : null
-                  tint: root.ringTint(window, 0)
+                  tint: root.ringTint(window)
                 }
 
                 RingTile {
                   width: parent.tileWidth
                   visible: overviewCard.ringCount === 2
                   window: root.ringWindows.length > 1 ? root.ringWindows[1] : null
-                  tint: root.ringTint(window, 1)
+                  tint: root.ringTint(window)
                 }
               }
 
-              // Forecast: one lane per ring, the window drawn as time from
-              // its start to its reset — where now is, where it runs out
-              // at this rate, and the stretch it would leave you blocked.
-              Column {
-                visible: !overviewCard.creditOnly && root.ringWindows.length > 0
+              // Free full resets the provider granted and you can still
+              // redeem: worth knowing before a limit bites.
+              Rectangle {
+                id: freeResets
+                readonly property var credits: root.provider ? root.provider.resetCredits : null
+                readonly property real expiresMs: credits ? Date.parse(String(credits.nextExpiresAt || "")) - root.nowMs : NaN
+                visible: !!credits && credits.available > 0
                 width: parent.width
-                spacing: Style.space(10)
+                height: Math.max(freeResetsText.implicitHeight, freeResetsExpiry.implicitHeight) + Style.space(16)
+                radius: root.controlRadius
+                color: root.alpha(Commons.Color.accent, 0.08)
+                border.width: 1
+                border.color: root.alpha(Commons.Color.accent, 0.24)
 
-                Rectangle {
-                  width: parent.width
-                  height: 1
-                  color: root.alpha(root.foreground, 0.08)
+                Text {
+                  id: freeResetsGlyph
+                  anchors.left: parent.left
+                  anchors.leftMargin: Style.space(10)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "󰑓"
+                  color: root.accentText
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.subtitle
                 }
 
-                Repeater {
-                  model: Math.min(2, root.ringWindows.length)
+                Column {
+                  id: freeResetsText
+                  anchors.left: freeResetsGlyph.right
+                  anchors.leftMargin: Style.space(8)
+                  anchors.right: freeResetsExpiry.left
+                  anchors.rightMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
 
-                  ForecastLane {
-                    required property int index
-                    width: overviewContent.width
-                    window: root.ringWindows[index] || null
-                    tint: root.ringTint(window, index)
+                  Text {
+                    width: parent.width
+                    elide: Text.ElideRight
+                    text: freeResets.credits ? freeResets.credits.available + " free reset"
+                      + (freeResets.credits.available === 1 ? "" : "s") + " to redeem" : ""
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
                   }
+
+                  Text {
+                    width: parent.width
+                    visible: text !== ""
+                    elide: Text.ElideRight
+                    text: root.redeemHint(root.provider)
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                Text {
+                  id: freeResetsExpiry
+                  anchors.right: parent.right
+                  anchors.rightMargin: Style.space(10)
+                  anchors.verticalCenter: parent.verticalCenter
+                  visible: text !== ""
+                  text: freeResets.expiresMs > 0 ? "expires in " + root.formatDuration(freeResets.expiresMs) : ""
+                  color: freeResets.expiresMs > 0 && freeResets.expiresMs < 2 * 86400000 ? root.warnText : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
                 }
               }
 
@@ -2601,147 +2619,6 @@ Panel {
                 ? "Best " + usage.formatTokenCount(root.activity.best.value) + " · " + root.shortHistoryDate(root.activity.best.date)
                 : ""
               tooltipText: "Consecutive days with recorded usage"
-            }
-          }
-
-          // ---------- Upcoming resets (every provider) ----------
-          // When room comes back, across every subscription, soonest first:
-          // the answer to "can I switch to something that resets sooner?".
-          BorderSurface {
-            id: resetsCard
-            visible: root.viewTab === "usage" && !root.settingsOpen && root.upcomingResets.length > 0
-            opacity: root.viewFade
-            width: parent.width
-            implicitHeight: resetsContent.implicitHeight + Style.space(28)
-            color: root.alpha(root.foreground, 0.035)
-            borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-            radius: root.cardRadius
-
-            Column {
-              id: resetsContent
-              anchors.left: parent.left
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              anchors.leftMargin: Style.space(14)
-              anchors.rightMargin: Style.space(14)
-              spacing: Style.space(4)
-
-              CardTitle {
-                width: parent.width
-                glyph: "󰦛"
-                text: "Upcoming resets"
-                note: "all subscriptions"
-              }
-
-              Repeater {
-                model: Math.min(4, root.upcomingResets.length)
-
-                Rectangle {
-                  id: resetRow
-                  required property int index
-                  readonly property var entry: root.upcomingResets[index] || ({})
-                  readonly property bool blocked: Number(entry.percent) >= 1
-                  readonly property bool current: !!root.provider && root.provider.providerId === entry.providerId
-                  width: resetsContent.width
-                  height: Style.space(38)
-                  radius: root.controlRadius
-                  color: resetRowHover.containsMouse ? root.alpha(root.foreground, 0.05)
-                    : (current ? root.alpha(Commons.Color.accent, 0.07) : "transparent")
-
-                  MouseArea {
-                    id: resetRowHover
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: root.selectedProviderId = resetRow.entry.providerId
-                  }
-
-                  // The clock time leads: it is what you plan around.
-                  Column {
-                    id: resetWhen
-                    anchors.left: parent.left
-                    anchors.leftMargin: Style.space(6)
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(78)
-
-                    Text {
-                      text: resetRow.entry.clock || ""
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.body
-                      font.bold: true
-                    }
-
-                    Text {
-                      text: resetRow.entry.day || ""
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                    }
-                  }
-
-                  ProviderMark {
-                    id: resetMark
-                    anchors.left: resetWhen.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(16)
-                    height: width
-                    provider: resetRow.entry.provider || null
-                  }
-
-                  Column {
-                    anchors.left: resetMark.right
-                    anchors.leftMargin: Style.space(8)
-                    anchors.right: resetGain.left
-                    anchors.rightMargin: Style.space(8)
-                    anchors.verticalCenter: parent.verticalCenter
-
-                    Text {
-                      width: parent.width
-                      text: (resetRow.entry.providerName || "") + " · " + (resetRow.entry.title || "")
-                      textFormat: Text.PlainText
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                      elide: Text.ElideRight
-                    }
-
-                    Text {
-                      width: parent.width
-                      text: "in " + root.formatDuration(Number(resetRow.entry.inMs) || 0)
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                    }
-                  }
-
-                  // What the reset hands back: a blocked window unlocks,
-                  // anything else frees the share it has used.
-                  Rectangle {
-                    id: resetGain
-                    anchors.right: parent.right
-                    anchors.rightMargin: Style.space(6)
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: resetGainText.implicitWidth + Style.space(14)
-                    height: resetGainText.implicitHeight + Style.space(6)
-                    radius: height / 2
-                    readonly property color tone: resetRow.blocked ? root.urgent
-                      : root.colorForSeverity(root.severityForPercent(Number(resetRow.entry.percent) || 0)) === root.foreground
-                        ? Commons.Color.accent : root.colorForSeverity(root.severityForPercent(Number(resetRow.entry.percent) || 0))
-                    color: root.alpha(tone, 0.16)
-
-                    Text {
-                      id: resetGainText
-                      anchors.centerIn: parent
-                      text: resetRow.blocked ? "unlocks" : "frees " + Math.round(Number(resetRow.entry.percent || 0) * 100) + "%"
-                      color: root.textFor(resetGain.tone)
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      font.bold: true
-                    }
-                  }
-                }
-              }
             }
           }
 
@@ -2979,6 +2856,8 @@ Panel {
                         : root.providerPercentText(accountRow.modelData)
                           + (accountRow.next ? " · " + String(accountRow.next.title || "Limit").toLowerCase()
                             + " resets in " + root.formatDuration(root.resetMsFor(accountRow.next)) : "")
+                          + (accountRow.modelData.resetCredits ? " · " + accountRow.modelData.resetCredits.available
+                            + " free reset" + (accountRow.modelData.resetCredits.available === 1 ? "" : "s") : "")
                       textFormat: Text.PlainText
                       color: String(accountRow.modelData.usageStatusText || "") !== ""
                         ? root.textFor(root.statusColor(accountRow.modelData)) : root.dim
@@ -5832,8 +5711,8 @@ Panel {
     }
   }
 
-  // One limit window as a ring in its own tint, with the reset as a pill
-  // underneath: countdown and wall-clock time, the fact the bar can't show.
+  // One limit window as a ring, with its reset underneath: countdown,
+  // wall-clock time and the outlook at the current rate.
   // `creditMode` draws a prepaid balance's credit left instead.
   component RingTile: Item {
     id: ringTile
@@ -5850,6 +5729,31 @@ Panel {
       ? Commons.Color.accent : root.colorForSeverity(root.balanceSeverity) : tint
     readonly property real resetMs: creditMode ? -1 : root.resetMsFor(window)
     readonly property var resetParts: root.momentParts(resetMs > 0 ? root.nowMs + resetMs : NaN)
+    readonly property bool full: !creditMode && hasValue && window.percent >= 1
+    readonly property bool runsOut: !full && !stale && resetMs > 0 && !!pace && pace.runsOutInMs >= 0
+    readonly property string resetLead: stale ? "Window reset" : (resetMs > 0 ? (full ? "Back in" : "Resets in") : "No reset reported")
+    readonly property string resetValue: !stale && resetMs > 0 ? root.formatDuration(resetMs) : ""
+    readonly property string resetWhen: stale ? "updates on the next refresh"
+      : (resetParts.day !== "" ? resetParts.day + " " + resetParts.clock : "")
+    readonly property string outlook: {
+      if (creditMode || stale || full || !pace) return ""
+      if (runsOut) return "Runs out " + root.formatDuration(Math.max(0, resetMs - pace.runsOutInMs)) + " before reset"
+      if (pace.status === "idle" || !(pace.projected >= 0)) return ""
+      var used = Math.min(99, Math.round(pace.projected * 100))
+      return usage.showAvailablePercentage ? "~" + (100 - used) + "% left at reset" : "~" + used + "% used by reset"
+    }
+    readonly property string detail: {
+      if (creditMode || !window) return ""
+      var lines = [String(window.title || "Limit") + " · " + Format.formatPercent(window.percent, usage.showAvailablePercentage)
+        + (usage.showAvailablePercentage ? " left" : " used")]
+      if (resetWhen !== "" && !stale) lines.push("Resets " + resetWhen)
+      if (runsOut) {
+        var at = root.momentParts(root.nowMs + pace.runsOutInMs)
+        lines.push("At this rate it empties " + at.day + " " + at.clock)
+      }
+      if (pace && pace.elapsed >= 0 && !stale) lines.push(Math.round(pace.elapsed * 100) + "% of the window has passed (the dot on the ring)")
+      return lines.join("\n")
+    }
 
     implicitHeight: ringTileColumn.implicitHeight
 
@@ -5926,192 +5830,76 @@ Panel {
         }
       }
 
-      // The reset, as large as the percentage it hands back.
-      Rectangle {
-        anchors.horizontalCenter: parent.horizontalCenter
+      // When this window hands its room back (the one place the panel
+      // says so) and, under it, how the current rate compares with that.
+      Column {
         visible: !ringTile.creditMode
-        width: Math.min(ringTile.width, resetPillRow.implicitWidth + Style.space(18))
-        height: resetPillRow.implicitHeight + Style.space(10)
-        radius: height / 2
-        color: root.alpha(ringTile.ringColor, 0.14)
-        border.width: 1
-        border.color: root.alpha(ringTile.ringColor, 0.40)
+        width: parent.width
+        spacing: Style.space(2)
 
         Row {
-          id: resetPillRow
-          anchors.centerIn: parent
-          spacing: Style.space(5)
+          anchors.horizontalCenter: parent.horizontalCenter
+          spacing: Style.space(4)
 
           Text {
-            anchors.verticalCenter: parent.verticalCenter
-            text: "󰦛"
-            color: root.textFor(ringTile.ringColor)
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-          }
-
-          Text {
-            anchors.verticalCenter: parent.verticalCenter
-            text: ringTile.stale ? "Reset" : (ringTile.resetMs > 0 ? root.formatDuration(ringTile.resetMs) : "No reset")
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.subtitle
-            font.bold: true
-          }
-
-          Text {
-            anchors.verticalCenter: parent.verticalCenter
-            visible: text !== ""
-            text: ringTile.stale ? "refreshing"
-              : (ringTile.resetParts.day !== "" ? ringTile.resetParts.day + " " + ringTile.resetParts.clock : "")
+            anchors.baseline: resetValueText.baseline
+            text: ringTile.resetLead
+            textFormat: Text.PlainText
             color: root.dim
             font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
+            font.pixelSize: Style.font.bodySmall
           }
+
+          Text {
+            id: resetValueText
+            visible: text !== ""
+            text: ringTile.resetValue
+            textFormat: Text.PlainText
+            color: ringTile.full ? root.textFor(root.urgent) : root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+          }
+        }
+
+        Text {
+          width: parent.width
+          horizontalAlignment: Text.AlignHCenter
+          elide: Text.ElideRight
+          text: ringTile.resetWhen
+          textFormat: Text.PlainText
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+
+        // Always one line tall, so both tiles keep the same height
+        // whatever their outlook says.
+        Text {
+          width: parent.width
+          horizontalAlignment: Text.AlignHCenter
+          elide: Text.ElideRight
+          text: ringTile.outlook
+          textFormat: Text.PlainText
+          color: ringTile.runsOut ? root.warnText : root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: ringTile.runsOut
         }
       }
     }
-  }
 
-  // A window drawn as time, from its start to its reset: the part already
-  // behind you, where now is, where it empties at this rate, and the stretch
-  // it would leave you blocked before the reset hands it back.
-  component ForecastLane: Item {
-    id: lane
-    property var window: null
-    property color tint: Commons.Color.accent
-    readonly property var pace: root.paceFor(window)
-    readonly property real spanMs: window ? Insights.windowSpanMs(window) : 0
-    readonly property real resetMs: root.resetMsFor(window)
-    readonly property bool full: !!window && window.percent >= 1
-    readonly property bool stale: root.windowIsStale(window)
-    readonly property bool hasTimeline: !stale && spanMs > 0 && resetMs > 0 && resetMs <= spanMs
-    readonly property real nowFrac: hasTimeline ? root.clamp(1 - resetMs / spanMs, 0, 1) : 0
-    readonly property bool runsOut: !full && !!pace && pace.runsOutInMs >= 0
-    readonly property real outFrac: runsOut ? root.clamp(nowFrac + pace.runsOutInMs / spanMs, nowFrac, 1) : -1
-    readonly property color outcomeColor: full ? root.urgent : (runsOut ? root.warn : tint)
+    MouseArea {
+      id: ringTileHover
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.NoButton
+    }
 
-    implicitHeight: laneColumn.implicitHeight
-
-    Column {
-      id: laneColumn
-      width: parent.width
-      spacing: Style.space(6)
-
-      Item {
-        width: parent.width
-        implicitHeight: Math.max(laneTitle.implicitHeight, laneOutcome.implicitHeight)
-
-        Text {
-          id: laneTitle
-          anchors.left: parent.left
-          anchors.verticalCenter: parent.verticalCenter
-          text: lane.window ? String(lane.window.title || "Limit") : ""
-          textFormat: Text.PlainText
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          font.bold: true
-        }
-
-        Text {
-          id: laneOutcome
-          anchors.right: parent.right
-          anchors.left: laneTitle.right
-          anchors.leftMargin: Style.space(10)
-          anchors.verticalCenter: parent.verticalCenter
-          horizontalAlignment: Text.AlignRight
-          elide: Text.ElideLeft
-          text: {
-            if (!lane.window) return ""
-            if (lane.stale) return "Reset passed · updates on the next refresh"
-            if (lane.full) return lane.resetMs > 0 ? "Empty now · back " + root.resetClock(lane.window) : "Empty now"
-            if (lane.runsOut) {
-              var at = root.momentParts(root.nowMs + lane.pace.runsOutInMs)
-              return "Empties " + (at.day === "today" ? "" : at.day + " ") + at.clock + " · "
-                + root.formatDuration(Math.max(0, lane.resetMs - lane.pace.runsOutInMs)) + " before reset"
-            }
-            if (lane.pace && lane.pace.status !== "idle")
-              return "Lasts to reset · ~" + Math.min(99, Math.round(lane.pace.projected * 100)) + "% used by then"
-            return lane.resetMs > 0 ? "Resets " + root.resetClock(lane.window) : "No reset time reported"
-          }
-          textFormat: Text.PlainText
-          color: lane.full ? root.textFor(root.urgent) : (lane.runsOut ? root.warnText : root.dim)
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          font.bold: lane.full || lane.runsOut
-        }
-      }
-
-      Item {
-        visible: lane.hasTimeline
-        width: parent.width
-        height: Style.space(10)
-
-        Rectangle {
-          id: laneTrack
-          anchors.fill: parent
-          radius: height / 2
-          color: root.track
-        }
-
-        // Time already behind you in this window.
-        Rectangle {
-          anchors.left: laneTrack.left
-          anchors.verticalCenter: laneTrack.verticalCenter
-          width: laneTrack.width * lane.nowFrac
-          height: laneTrack.height
-          radius: height / 2
-          gradient: Gradient {
-            orientation: Gradient.Horizontal
-            GradientStop { position: 0; color: root.alpha(lane.tint, 0.25) }
-            GradientStop { position: 1; color: root.alpha(lane.tint, 0.75) }
-          }
-        }
-
-        // The stretch with nothing left: from the projected run-out (or
-        // now, when already empty) to the reset.
-        Rectangle {
-          visible: lane.full || lane.runsOut
-          x: laneTrack.width * (lane.full ? lane.nowFrac : lane.outFrac)
-          anchors.verticalCenter: laneTrack.verticalCenter
-          width: Math.max(2, laneTrack.width - x)
-          height: laneTrack.height
-          radius: height / 2
-          color: root.alpha(lane.outcomeColor, 0.55)
-        }
-
-        // Now.
-        Rectangle {
-          x: Math.round(laneTrack.width * lane.nowFrac) - width / 2
-          anchors.verticalCenter: laneTrack.verticalCenter
-          width: Math.max(5, Style.space(5))
-          height: laneTrack.height + Style.space(8)
-          radius: width / 2
-          color: root.surface
-
-          Rectangle {
-            anchors.centerIn: parent
-            width: Math.max(3, Style.space(3))
-            height: parent.height - 2
-            radius: width / 2
-            color: root.foreground
-          }
-        }
-
-        // Where it empties at this rate.
-        Rectangle {
-          visible: lane.runsOut
-          x: Math.round(laneTrack.width * lane.outFrac) - width / 2
-          anchors.verticalCenter: laneTrack.verticalCenter
-          width: Style.space(12)
-          height: width
-          radius: width / 2
-          color: lane.outcomeColor
-          border.width: 2
-          border.color: root.surface
-        }
-      }
+    PanelToolTip {
+      visible: ringTileHover.containsMouse && text !== ""
+      text: ringTile.detail
+      fontFamily: root.fontFamily
     }
   }
 
