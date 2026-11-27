@@ -137,6 +137,18 @@ def main():
             return 1
         replacement = replacement.replace(old, new)
 
+    # Per-day, per-model buckets for the cost chart (see daily_usage). A
+    # standalone scanner that doesn't use Omarchy's shared module is left
+    # as it is and simply reports no daily breakdown.
+    if "from collectors import" in replacement:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        try:
+            from agent_usage_collectors.daily_usage import install
+        except ImportError:
+            pass
+        else:
+            install()
+
     namespace = {"__name__": "__main__", "__file__": str(PACKAGED_COLLECTOR)}
     exec(compile(replacement, str(PACKAGED_COLLECTOR), "exec"), namespace)
     return 0

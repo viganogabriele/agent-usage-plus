@@ -13,6 +13,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from .daily_usage import take_daily_usage
+
 
 def helper_path() -> Path | None:
     configured = os.environ.get("AGENT_USAGE_PLUS_COST_HELPER", "")
@@ -76,6 +78,9 @@ def decorate(record: dict[str, Any], provider: str, period: str) -> dict[str, An
     omits the estimate rather than inventing $0.
     """
     normalise_today_buckets(record)
+    # Internal hand-off from the compatibility readers: always taken off the
+    # record (it is not part of the collector contract), and only used here.
+    daily = take_daily_usage(record)
     helper = helper_path()
     if helper is None:
         return record
@@ -85,6 +90,8 @@ def decorate(record: dict[str, Any], provider: str, period: str) -> dict[str, An
         "modelUsage": record.get("modelUsage") or {},
         "activeDays": record.get("activeDays", 0),
     }
+    if daily:
+        payload["dailyModelUsage"] = daily
     try:
         result = subprocess.run(
             [str(helper)], input=json.dumps(payload), text=True, capture_output=True,

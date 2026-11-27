@@ -127,9 +127,10 @@ Omarchy's Codex collector reports.
 - Omarchy's own multi-account mode probes several logins in one run; those
   answers can't be matched to records safely, so that mode shows none.
 
-The plugin's updater publishes Claude through this reader (or through
-`omarchy-agent-usage-claude-cost`, which runs it, when
-`--with-transcript-cost` is installed). If the reader fails, Omarchy's
+The plugin's updater publishes Claude through
+`omarchy-agent-usage-claude-cost`, which runs this reader and then adds the
+API-price estimate (the same way Codex goes through
+`omarchy-agent-usage-codex-cost`). If the reader fails, Omarchy's
 packaged updater refreshes Claude instead, so Claude never goes blank. Set
 `AGENT_USAGE_PLUS_CLAUDE_COLLECTOR=` (empty) to leave Claude entirely to
 Omarchy.

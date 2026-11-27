@@ -67,6 +67,29 @@ test("plugin refresh uses the Codex compatibility updater without a separate ins
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, "state/omarchy/agents/usage/codex.json"))).limits[0].percent, 0.2)
 })
 
+function claudeRouting(extraEnv) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-usage-claude-route-"))
+  const base = path.join(root, "base")
+  const seen = path.join(root, "seen")
+  executable(base, `printf '%s' "\${AGENT_USAGE_PLUS_CLAUDE_COLLECTOR-unset}" >"${seen}"`)
+  const env = { ...process.env, AGENT_USAGE_PLUS_BASE_UPDATER: base, ...extraEnv }
+  if (!("AGENT_USAGE_PLUS_CLAUDE_COLLECTOR" in extraEnv)) delete env.AGENT_USAGE_PLUS_CLAUDE_COLLECTOR
+  execFileSync("bash", [pluginUpdater, "claude"], { env })
+  return { root, seen: fs.readFileSync(seen, "utf8") }
+}
+
+test("plugin updater publishes Claude through the cost wrapper by default", t => {
+  const result = claudeRouting({})
+  t.after(() => fs.rmSync(result.root, { recursive: true, force: true }))
+  assert.equal(result.seen, path.join(path.dirname(pluginUpdater), "omarchy-agent-usage-claude-cost"))
+})
+
+test("an empty Claude collector setting still leaves Claude to Omarchy", t => {
+  const result = claudeRouting({ AGENT_USAGE_PLUS_CLAUDE_COLLECTOR: "" })
+  t.after(() => fs.rmSync(result.root, { recursive: true, force: true }))
+  assert.equal(result.seen, "")
+})
+
 test("a failing packaged updater still lets the Codex refresh land", t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-usage-updater-"))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))

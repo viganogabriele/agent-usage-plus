@@ -20,6 +20,14 @@ All notable changes to this project are documented in this file. The format is b
     read by the new `omarchy-agent-usage-claude-compat`, which opts Omarchy's
     own usage request in to Anthropic's `cedar_ember` block, keeps no grant
     identifiers, and falls back to Omarchy's updater if it fails.
+  - The Cost view's **By day** chart now has real data for Claude and Codex:
+    their compatibility readers keep Omarchy's per-day, per-model token
+    buckets (last 31 days) and the cost wrappers price them into
+    `cost.byDay`. The plugin's updater now publishes Claude through the cost
+    wrapper by default, as it already did for Codex.
+  - Price catalogue 2026-11-27: adds `gpt-6.2-astra`, `gpt-6.2-sol`,
+    `gpt-6.1-sol` and `claude-haiku-5-5`, and corrects `claude-sonnet-5-5`'s
+    cache-read rate to $0.10 per million tokens.
   - Four views under the overview — Usage, Activity, Models, Cost — instead
     of one long Details scroll; `e` steps through them, and a view with
     nothing to show says why.

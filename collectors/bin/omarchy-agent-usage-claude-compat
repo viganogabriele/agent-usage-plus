@@ -245,6 +245,16 @@ class Tracker:
         return load_cached()
 
 
+def install_daily_usage() -> None:
+    """Keep per-day, per-model buckets for the cost chart (see daily_usage)."""
+    sys.path.insert(0, str(HERE.parent))
+    try:
+        from agent_usage_collectors.daily_usage import install  # noqa: PLC0415
+    except ImportError:
+        return
+    install()
+
+
 def main() -> int:
     base = resolve_base()
     if base is None:
@@ -257,6 +267,7 @@ def main() -> int:
         code = None
     namespace: dict[str, Any] = {"__name__": "agent_usage_plus_claude_base", "__file__": str(base)}
     if code is not None:
+        install_daily_usage()
         sys.argv[0] = str(base)
         exec(code, namespace)
     if code is None or not all(callable(namespace.get(name)) for name in ("main", "open_json", "emit")):
