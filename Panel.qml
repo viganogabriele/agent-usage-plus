@@ -359,26 +359,16 @@ Panel {
     return best
   }
 
-  // The reset as a wall-clock moment, 24-hour like every time in the panel:
-  // "today 18:40", "tomorrow 09:00", "Fri 09:00", or a date further out.
   function resetClock(w) {
     var ms = w ? Date.parse(String(w.resetAt || "")) : NaN
-    var parts = momentParts(ms)
-    return parts.day === "" ? "" : parts.day + " " + parts.clock
+    return formatResetMoment(ms)
   }
 
-  // A moment split into its day ("today", "tomorrow", "Fri", "Wed 2 Dec")
-  // and its 24-hour clock time ("18:40").
-  function momentParts(ms) {
-    if (!isFinite(ms)) return { day: "", clock: "" }
+  // Reset dates use the local calendar date and a 24-hour clock.
+  function formatResetMoment(ms) {
     var at = new Date(ms)
-    var now = new Date(root.nowMs)
-    var clock = Qt.formatTime(at, "HH:mm")
-    var startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
-    var dayOffset = Math.floor((new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime() - startOfToday) / 86400000 + 0.5)
-    var day = dayOffset <= 0 ? "today" : (dayOffset === 1 ? "tomorrow"
-      : (dayOffset < 7 ? root.weekdayNames[at.getDay()] : root.dateLabel(at, true)))
-    return { day: day, clock: clock }
+    if (!isFinite(at.getTime())) return ""
+    return root.dateLabel(at, false) + " " + Qt.formatTime(at, "HH:mm")
   }
 
   // Where a granted free reset is redeemed; the panel only reports them.
@@ -877,9 +867,8 @@ Panel {
       + "-" + String(now.getDate()).padStart(2, "0")
   }
 
-  // One date convention for the whole panel: "20 Nov", or "Fri 20 Nov"
-  // with the weekday; spans are always formatDuration ("3d 5h"); moments
-  // near now read "today", "tomorrow" or a weekday (momentParts).
+  // Calendar days read "20 Nov", with the weekday in detailed history labels.
+  // Reset timestamps use the same date plus a 24-hour clock.
   readonly property var weekdayNames: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
   readonly property var monthNames: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
@@ -2511,8 +2500,7 @@ Panel {
                   anchors.right: parent.right
                   text: {
                     if (expiry == null) return "Expiry not reported"
-                    var parts = root.momentParts(expiry)
-                    return root.formatDuration(remaining) + " left · " + parts.day + " " + parts.clock
+                    return root.formatDuration(remaining) + " left · " + root.formatResetMoment(expiry)
                   }
                   color: remaining > 0 && remaining < 2 * 86400000 ? root.warnText : root.dim
                   font.family: root.fontFamily
@@ -5541,13 +5529,12 @@ Panel {
     readonly property color ringColor: creditMode ? root.colorForSeverity(root.balanceSeverity) === root.foreground
       ? Commons.Color.accent : root.colorForSeverity(root.balanceSeverity) : tint
     readonly property real resetMs: creditMode ? -1 : root.resetMsFor(window)
-    readonly property var resetParts: root.momentParts(resetMs > 0 ? root.nowMs + resetMs : NaN)
     readonly property bool full: !creditMode && !!window && window.percent >= 1
     readonly property bool runsOut: !full && !stale && resetMs > 0 && !!pace && pace.runsOutInMs >= 0
     readonly property string resetLead: stale ? "Window reset" : (resetMs > 0 ? (full ? "Back in" : "Resets in") : "No reset reported")
     readonly property string resetValue: !stale && resetMs > 0 ? root.formatDuration(resetMs) : ""
     readonly property string resetWhen: stale ? "updates on the next refresh"
-      : (resetParts.day !== "" ? resetParts.day + " " + resetParts.clock : "")
+      : (resetMs > 0 ? root.resetClock(window) : "")
     readonly property string outlook: {
       if (creditMode || stale || full || !pace) return ""
       if (runsOut) return "Runs out " + root.formatDuration(Math.max(0, resetMs - pace.runsOutInMs)) + " before reset"
@@ -5560,10 +5547,8 @@ Panel {
       var lines = [String(window.title || "Limit") + " · " + Format.formatPercent(window.percent, usage.showAvailablePercentage)
         + (usage.showAvailablePercentage ? " left" : " used")]
       if (resetWhen !== "" && !stale) lines.push("Resets " + resetWhen)
-      if (runsOut) {
-        var at = root.momentParts(root.nowMs + pace.runsOutInMs)
-        lines.push("At this rate it empties " + at.day + " " + at.clock)
-      }
+      if (runsOut)
+        lines.push("At this rate it empties " + root.formatResetMoment(root.nowMs + pace.runsOutInMs))
       if (pace && pace.elapsed >= 0 && !stale) lines.push(Math.round(pace.elapsed * 100) + "% of the window has passed (the dot on the ring)")
       return lines.join("\n")
     }
@@ -6172,7 +6157,8 @@ Panel {
         text: {
           if (root.windowIsStale(limitRow.window)) return "Reset passed · updates on the next refresh"
           var remainingMs = root.resetMsFor(limitRow.window)
-          return remainingMs > 0 ? "Resets in " + root.formatDuration(remainingMs) : ""
+          return remainingMs > 0
+            ? "Resets in " + root.formatDuration(remainingMs) + " · " + root.resetClock(limitRow.window) : ""
         }
         color: root.dim
         font.family: root.fontFamily

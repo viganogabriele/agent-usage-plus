@@ -48,7 +48,7 @@ test("every detail card belongs to exactly one view", () => {
 test("each window's reset is stated once, under its own ring", () => {
   const ring = block("component RingTile: Item {", "component TabStrip")
   assert.match(ring, /root\.formatDuration\(resetMs\)/)
-  assert.match(ring, /resetParts\.day \+ " " \+ resetParts\.clock/)
+  assert.match(ring, /resetWhen:.*\n\s*:.*root\.resetClock\(window\)/)
   assert.match(ring, /" before reset"/)
   // No second or third copy of the same reset elsewhere in the panel.
   assert.doesNotMatch(source, /component ForecastLane|upcomingResets|id: resetsCard/)
@@ -57,7 +57,14 @@ test("each window's reset is stated once, under its own ring", () => {
   assert.doesNotMatch(overview, /model: overviewCard\.ringCount === 2 \? root\.ringWindows/)
   // Free resets live in the Usage view, not in the overview.
   assert.doesNotMatch(overview, /resetCredits/)
-  assert.match(block("id: freeResetsCard", "id: balanceSection"), /formatDuration\(remaining\) \+ " left · "/)
+})
+
+test("quota resets and redeemable credits show day, month and local clock", () => {
+  const formatter = block("function formatResetMoment(ms)", "\n  }")
+  assert.match(formatter, /dateLabel\(at, false\) \+ " " \+ Qt\.formatTime\(at, "HH:mm"\)/)
+  assert.match(block("function resetClock(w)", "\n  }"), /formatResetMoment\(ms\)/)
+  assert.match(block("id: freeResetsCard", "id: balanceSection"), /formatDuration\(remaining\) \+ " left · " \+ root\.formatResetMoment\(expiry\)/)
+  assert.match(block("component LimitRow: Column", "component Meter: Item"), /root\.resetClock\(limitRow\.window\)/)
 })
 
 test("ring and chart colors stay on the theme accent until a threshold says otherwise", () => {
