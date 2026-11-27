@@ -4,13 +4,13 @@
 // `publishedAt` date and affected model entry together.
 
 var PRICE_CATALOGUE = {
-  version: "2026-09-29",
+  version: "2026-11-27",
   currency: "USD",
   unit: "per-1m-tokens",
   providers: {
     claude: {
       source: "https://platform.claude.com/docs/en/about-claude/pricing",
-      publishedAt: "2026-09-29",
+      publishedAt: "2026-11-27",
       // cacheCreationInputTokens has no TTL in the record contract. The
       // normal 5-minute cache-write rate is therefore the only defensible
       // default; collectors with 1-hour cache data must not reuse this
@@ -20,7 +20,11 @@ var PRICE_CATALOGUE = {
         // API standard rates, not the subscription price or a cloud-reseller
         // regional/fast-mode surcharge.
         "claude-opus-5-5": { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
-        "claude-sonnet-5-5": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+        "claude-sonnet-5-5": { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+        // Haiku 5.5 has a second tier for prompts over 100K tokens.
+        // Transcripts don't record a request's whole prompt size, so this is
+        // the standard (up to 100K) tier, as Codex uses short-context rates.
+        "claude-haiku-5-5": { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
         "claude-opus-5": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
         "claude-sonnet-5": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
         "claude-haiku-4-5-20251001": { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
@@ -33,12 +37,17 @@ var PRICE_CATALOGUE = {
     },
     codex: {
       source: "https://developers.openai.com/api/docs/pricing",
-      publishedAt: "2026-09-29",
+      publishedAt: "2026-11-27",
       // GPT-5.6 and later charge cache writes at 1.25x input. The model map
       // intentionally uses exact transcript ids, never fuzzy matching.
       // These are standard short-context rates; transcripts do not identify
       // long-context or faster processing tiers.
       models: {
+        // GPT-6.1/6.2 list 30-minute and 12-hour cache writes; transcripts
+        // don't say which, so cacheWrite is the 30-minute rate.
+        "gpt-6.2-astra": { input: 8, output: 40, cacheRead: 0.4, cacheWrite: 10 },
+        "gpt-6.2-sol": { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+        "gpt-6.1-sol": { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
         "gpt-6-astra": { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
         "gpt-6-sol": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
         "gpt-6-luna": { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },

@@ -30,7 +30,32 @@ test("calculateCost prices current Claude Code models, including Opus 5.5", () =
   assert.deepEqual(result.unknownModels, [])
   assert.equal(result.cost.incomplete, false)
   assert.equal(result.cost.byModel.find(row => row.model === "claude-opus-5-5").usd, 29.2)
-  assert.equal(result.cost.byModel.find(row => row.model === "claude-sonnet-5-5").usd, 14.7)
+  assert.equal(result.cost.byModel.find(row => row.model === "claude-sonnet-5-5").usd, 14.6) // 2 + 10 + .1 + 2.5
+})
+
+test("calculateCost prices Claude Haiku 5.5 at its standard tier", () => {
+  const bucket = { inputTokens: 1000000, outputTokens: 1000000, cacheReadInputTokens: 1000000, cacheCreationInputTokens: 1000000 }
+  const result = Cost.calculateCost({ provider: "claude", modelUsage: { "claude-haiku-5-5": bucket } })
+  assert.deepEqual(result.unknownModels, [])
+  assert.equal(result.cost.estimateUsd, 0.735) // .1 + .5 + .01 + .125
+})
+
+test("calculateCost prices GPT-6.1 and GPT-6.2 and keeps unknown day models out of byDay", () => {
+  const bucket = { inputTokens: 1000000, outputTokens: 1000000, cacheReadInputTokens: 1000000, cacheCreationInputTokens: 1000000 }
+  const result = Cost.calculateCost({ provider: "codex", modelUsage: {
+    "gpt-6.2-astra": bucket,
+    "gpt-6.2-sol": bucket,
+    "gpt-6.1-sol": bucket,
+  }, dailyModelUsage: {
+    "2026-11-26": { "gpt-6.2-sol": bucket, "codex-auto-review": bucket },
+    "2026-11-27": { "gpt-6.2-astra": bucket },
+  } })
+
+  assert.deepEqual(result.unknownModels, ["codex-auto-review"])
+  assert.equal(result.cost.byModel.find(row => row.model === "gpt-6.2-astra").usd, 58.4) // 8 + 40 + .4 + 10
+  assert.equal(result.cost.byModel.find(row => row.model === "gpt-6.2-sol").usd, 14.6)
+  assert.equal(result.cost.byModel.find(row => row.model === "gpt-6.1-sol").usd, 14.6)
+  assert.deepEqual(result.cost.byDay, [{ date: "2026-11-26", usd: 14.6 }, { date: "2026-11-27", usd: 58.4 }])
 })
 
 test("calculateCost uses current Codex standard rates and returns day rows", () => {

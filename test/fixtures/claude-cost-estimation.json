@@ -11,6 +11,6 @@
   },
   "expected": {
     "estimateUsd": 22.05,
-    "pricingVersion": "2026-09-29"
+    "pricingVersion": "2026-11-27"
   }
 }
