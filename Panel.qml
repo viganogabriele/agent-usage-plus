@@ -17,6 +17,7 @@ import "logic/notifications.js" as Notify
 import "logic/meter-colors.js" as MeterColors
 import "logic/insights.js" as Insights
 import "logic/contrast.js" as Contrast
+import "logic/series-colors.js" as SeriesColors
 
 Panel {
   id: root
@@ -398,11 +399,29 @@ Panel {
     return Commons.Color.accent
   }
 
-  // Series in a chart are tonal steps of the theme accent rather than new
-  // hues, so no series ever reads as a warning color.
+  // Series that must be told apart (models, token kinds) get distinct hues
+  // turned from the theme accent, kept out of the red/amber warning bands
+  // and readable on the popup surface (logic/series-colors.js).
+  readonly property var seriesPalette: {
+    var colors = SeriesColors.categorical(Commons.Color.accent, root.surface, 12, Contrast.contrastRatio)
+    var out = []
+    for (var i = 0; i < colors.length; i++) out.push(Qt.rgba(colors[i].r, colors[i].g, colors[i].b, 1))
+    return out
+  }
   function seriesColor(index) {
-    var steps = [1, 0.72, 0.5, 0.34, 0.22]
-    return root.alpha(Commons.Color.accent, steps[Math.max(0, index) % steps.length])
+    var palette = root.seriesPalette
+    return palette.length > 0 ? palette[Math.max(0, index) % palette.length] : Commons.Color.accent
+  }
+  // One color per model across views: its rank by tokens in the Models view
+  // (detailModels), so the Cost view's bar and legend match those rows.
+  readonly property var modelColorOrder: {
+    var ids = []
+    for (var i = 0; i < root.detailModels.length; i++) ids.push(String(root.detailModels[i].id))
+    return ids
+  }
+  function modelColor(id, fallbackIndex) {
+    var at = root.modelColorOrder.indexOf(String(id || ""))
+    return root.seriesColor(at >= 0 ? at : (Number(fallbackIndex) || 0))
   }
 
   // Cards under the tabs fade in on a view change instead of popping.
@@ -2844,10 +2863,10 @@ Panel {
               var m = root.tokenMixData
               if (!m || !(m.total > 0)) return []
               return [
-                { label: "Cache read", value: m.cacheRead, color: Commons.Color.accent },
-                { label: "Cache write", value: m.cacheWrite, color: root.alpha(Commons.Color.accent, 0.45) },
-                { label: "Input", value: m.input, color: root.foreground },
-                { label: "Output", value: m.output, color: root.alpha(root.foreground, 0.45) }
+                { label: "Cache read", value: m.cacheRead, color: root.seriesColor(0) },
+                { label: "Cache write", value: m.cacheWrite, color: root.seriesColor(1) },
+                { label: "Input", value: m.input, color: root.seriesColor(2) },
+                { label: "Output", value: m.output, color: root.seriesColor(3) }
               ]
             }
 
@@ -3487,6 +3506,7 @@ Panel {
                   required property int index
                   width: detailModelContent.width
                   row: modelData
+                  tint: root.seriesColor(index)
                   share: modelData.total / Math.max(1, root.detailModels[0].total)
                 }
               }
@@ -3770,7 +3790,7 @@ Panel {
                           width: Math.max(0, (costModelStack.width - costModelStack.spacing * Math.max(0, root.costModelRows.length - 1))
                             * root.clamp(Number(modelData.share || 0), 0, 1))
                           radius: height / 2
-                          color: root.seriesColor(index)
+                          color: root.modelColor(modelData.model, index)
                           visible: width >= 1
                         }
                       }
@@ -3794,7 +3814,7 @@ Panel {
                         width: Style.space(8)
                         height: width
                         radius: width / 2
-                        color: root.seriesColor(costModelRow.index)
+                        color: root.modelColor(costModelRow.modelData.model, costModelRow.index)
                       }
 
                       Text {
@@ -6243,6 +6263,7 @@ Panel {
     id: modelRow
     property var row: null
     property real share: 0
+    property color tint: Commons.Color.accent
 
     implicitHeight: modelName.implicitHeight + Style.spacing.lg
 
@@ -6258,11 +6279,22 @@ Panel {
       anchors.bottom: parent.bottom
       width: parent.width * root.clamp(modelRow.share, 0, 1)
       radius: root.controlRadius
-      color: root.alpha(root.foreground, 0.14)
+      color: root.alpha(modelRow.tint, 0.2)
 
       Behavior on width {
         NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
       }
+    }
+
+    Rectangle {
+      id: modelDot
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(8)
+      height: width
+      radius: width / 2
+      color: modelRow.tint
     }
 
     Text {
@@ -6273,7 +6305,7 @@ Panel {
       font.family: root.fontFamily
       font.pixelSize: Style.font.bodySmall
       elide: Text.ElideRight
-      anchors.left: parent.left
+      anchors.left: modelDot.right
       anchors.leftMargin: Style.space(8)
       anchors.right: modelTokens.left
       anchors.rightMargin: Style.space(8)
