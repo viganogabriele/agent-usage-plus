@@ -6,12 +6,10 @@ claude.ai Settings > Usage). Anthropic reports them in a ``cedar_ember``
 block of the same OAuth usage response Omarchy's collector already reads,
 but only when the request opts in with ``?cedar_ember=1``.
 
-This wrapper runs Omarchy's packaged collector unchanged except for two
-runtime hooks: its usage request gains that query (and is retried once
-without it if Anthropic rejects it, so the limits never suffer), and the
-record it emits gains ``resetCredits: {available, nextExpiresAt}``, the shape
-Omarchy's Codex collector already uses. It never reads credentials itself:
-the request, token included, is built by Omarchy's code. Grant identifiers
+This wrapper adds the query to Omarchy's usage request, retrying once
+without it if Anthropic rejects it. The emitted record gains the available
+count and each reset expiry for that account. Omarchy builds the request
+with its existing credentials. Grant identifiers
 and labels are never kept; the only thing cached between probes is the
 expiry of each available reset, so a probe skipped by Omarchy's own reuse
 window still shows the count, and an expired reset drops out on time.
@@ -75,11 +73,11 @@ def _bound(value: Any) -> tuple[bool, dt.datetime | None]:
         return False, None
     try:
         moment = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+        if moment.tzinfo is None:
+            return False, None
+        return True, moment.astimezone(dt.timezone.utc)
+    except (OverflowError, ValueError):
         return False, None
-    if moment.tzinfo is None:
-        return False, None
-    return True, moment
 
 
 def _whole(value: Any) -> int | None:
@@ -119,7 +117,7 @@ def reset_expiries(block: Any, now: dt.datetime) -> list[str] | None:
             continue
         if len(expiries) + left > MAX_RESETS:
             return None
-        expiries += [end.astimezone(dt.timezone.utc).isoformat() if end else ""] * left
+        expiries += [end.isoformat() if end else ""] * left
     return expiries
 
 
@@ -134,23 +132,30 @@ def summary(expiries: list[str] | None, now: dt.datetime) -> dict[str, Any] | No
             live.append(moment)
     if not live:
         return None
-    dated = [moment for moment in live if moment is not None]
+    dated = sorted(moment for moment in live if moment is not None)
+    expiry_strings = [moment.isoformat() for moment in dated]
     return {
         "available": len(live),
-        "nextExpiresAt": min(dated).astimezone(dt.timezone.utc).isoformat() if dated else "",
+        "nextExpiresAt": expiry_strings[0] if expiry_strings else "",
+        "expiries": expiry_strings + [""] * (len(live) - len(dated)),
     }
 
 
-def cache_path() -> Path:
+def cache_path(scope: str = "") -> Path:
     config = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
-    key = hashlib.sha256(os.path.abspath(config).encode("utf-8")).hexdigest()[:16]
+    identity = os.path.abspath(config) + ("\0" + scope if scope else "")
+    key = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
     root = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
     return root / "agent-usage-plus" / f"claude-reset-credits-{key}.json"
 
 
-def load_cached() -> list[str] | None:
+def load_cached(scope: str = "") -> list[str] | None:
     try:
-        data = json.loads(cache_path().read_text(encoding="utf-8"))
+        with cache_path(scope).open("rb") as handle:
+            raw = handle.read(4097)
+        if len(raw) > 4096:
+            return None
+        data = json.loads(raw)
     except (OSError, ValueError):
         return None
     expiries = data.get("expiries") if isinstance(data, dict) else None
@@ -159,17 +164,23 @@ def load_cached() -> list[str] | None:
     return [value for value in expiries if isinstance(value, str)]
 
 
-def save_cached(expiries: list[str]) -> None:
-    path = cache_path()
+def save_cached(expiries: list[str], scope: str = "") -> None:
+    path = cache_path(scope)
+    temporary = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=".claude-reset-credits.")
         with os.fdopen(handle, "w", encoding="utf-8") as output:
             json.dump({"expiries": expiries}, output)
-        os.chmod(temporary, 0o600)
         os.replace(temporary, path)
     except OSError:
         pass
+    finally:
+        if temporary is not None:
+            try:
+                Path(temporary).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def claude_cli_version() -> str:
@@ -197,6 +208,10 @@ class Tracker:
         self.endpoint = str(namespace.get("USAGE_ENDPOINT") or "")
         self.open_json = namespace["open_json"]
         self.emit = namespace["emit"]
+        self.collect_limits = namespace.get("collect_limits")
+        self.account_entry = namespace.get("account_entry")
+        self.scoped = callable(self.collect_limits) and callable(self.account_entry)
+        self.top_level_credits = None
         self.http_error = namespace.get("HttpError", Exception)
         self.now = now or dt.datetime.now(dt.timezone.utc)
         self.version = version
@@ -205,12 +220,18 @@ class Tracker:
     def install(self) -> None:
         self.namespace["open_json"] = self.wrapped_open_json
         self.namespace["emit"] = self.wrapped_emit
+        if self.scoped:
+            self.namespace["collect_limits"] = self.wrapped_collect_limits
+            self.namespace["account_entry"] = self.wrapped_account_entry
 
     def wrapped_open_json(self, request: Any, *args: Any, **kwargs: Any) -> Any:
         if not isinstance(request, urllib.request.Request) or request.full_url != self.endpoint:
             return self.open_json(request, *args, **kwargs)
-        # Tells accounts apart within one run without keeping the token.
-        who = hashlib.sha256(str(request.get_header("Authorization") or "").encode("utf-8")).hexdigest()
+        # Older collectors have no native account cache key. Distinguish
+        # their probes within this run without persisting the token.
+        who = "" if self.scoped else hashlib.sha256(
+            str(request.get_header("Authorization") or "").encode("utf-8")
+        ).hexdigest()
         version = self.version() if callable(self.version) else str(self.version)
         headers = dict(request.header_items())
         headers["User-Agent"] = f"claude-cli/{version} (external, cli)"
@@ -220,29 +241,49 @@ class Tracker:
         except self.http_error as error:
             if not rejects_opt_in(error):
                 raise
-            return self.open_json(request, *args, **kwargs)
-        if isinstance(payload, dict):
-            self.probes[who] = reset_expiries(payload.get("cedar_ember"), self.now)
+            payload = self.open_json(request, *args, **kwargs)
+            self.probes[who] = None
+            return payload
+        self.probes[who] = reset_expiries(payload.get("cedar_ember"), self.now) if isinstance(payload, dict) else None
         return payload
+
+    def wrapped_collect_limits(self, *args: Any, **kwargs: Any) -> Any:
+        # Use Omarchy's per-subscription cache name. Its caller selects the
+        # login, so a subsequent cached read can never pick another probe.
+        scope = kwargs.get("cache_name", args[4] if len(args) > 4 else "claude-limits.json")
+        self.probes.clear()
+        result = self.collect_limits(*args, **kwargs)
+        self.top_level_credits = None
+        if isinstance(result, dict) and isinstance(scope, str) and (self.probes or result.get("live")):
+            credits = summary(self.current(scope), self.now)
+            if credits:
+                result["resetCredits"] = self.top_level_credits = credits
+        return result
+
+    def wrapped_account_entry(self, account: Any, limits: dict[str, Any], plan: str, **extra: Any) -> Any:
+        if limits.get("resetCredits"):
+            extra["resetCredits"] = limits["resetCredits"]
+        return self.account_entry(account, limits, plan, **extra)
 
     def wrapped_emit(self, record: Any, *args: Any, **kwargs: Any) -> Any:
         if isinstance(record, dict) and record.get("id") == "claude":
-            expiries = self.current()
-            credits = summary(expiries, self.now)
+            if self.scoped:
+                active = next((row for row in record.get("accounts") or [] if isinstance(row, dict) and row.get("active")), None)
+                credits = active.get("resetCredits") if active is not None else self.top_level_credits
+            else:
+                credits = None if record.get("accounts") or record.get("usageStatusText") else summary(self.current(), self.now)
             if credits:
                 record["resetCredits"] = credits
         return self.emit(record, *args, **kwargs)
 
-    def current(self) -> list[str] | None:
-        # Omarchy's own multi-account mode probes several logins in one run;
-        # their answers can't be matched to records safely, so they show none.
+    def current(self, scope: str = "") -> list[str] | None:
         if len(self.probes) > 1:
             return None
         if len(self.probes) == 1:
             expiries = next(iter(self.probes.values())) or []
-            save_cached(expiries)
+            save_cached(expiries, scope)
             return expiries
-        return load_cached()
+        return load_cached(scope)
 
 
 def install_daily_usage() -> None:

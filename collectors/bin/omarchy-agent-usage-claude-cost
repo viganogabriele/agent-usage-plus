@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -23,5 +22,6 @@ try:
     if not isinstance(record, dict):
         raise ValueError("base collector did not emit an object")
     print(json.dumps(decorate(record, "claude", "All time"), separators=(",", ":")))
-except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError) as exc:
-    print(json.dumps({"id": "claude", "name": "Claude Code", "ready": False, "usageStatusText": "Claude collector unavailable", "authHelpText": f"Install Claude Code or set AGENT_USAGE_PLUS_CLAUDE_BASE_COLLECTOR. ({type(exc).__name__})"}, separators=(",", ":")))
+except (OSError, subprocess.SubprocessError, ValueError) as exc:
+    print(f"Claude compatibility collector failed ({type(exc).__name__})", file=sys.stderr)
+    raise SystemExit(1)

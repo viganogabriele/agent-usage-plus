@@ -78,7 +78,7 @@ report for it right now" — not "no one should bother."
 | `retryAdvised` | boolean | no | Set this to `true` when your collector failed to reach its remote endpoint for transport reasons (DNS/network down, not a real HTTP error) rather than an auth problem. The panel schedules one retry ~30s later instead of waiting out the full refresh interval, and only for agents that set this flag — one provider's outage doesn't put every other collector on a fast retry loop. |
 | `limits` | array of limit windows | no | Rate-limit allowances (session/weekly/model-scoped/etc). See "Limits" below. Mutually meaningful alongside or instead of `balance` — an agent can report neither, either, or (unusually) both. |
 | `balance` | object | no | A prepaid credit ledger, for agents billed by consumption rather than a rate-limit window. See "Balance" below. |
-| `resetCredits` | object: `{ "available": int, "nextExpiresAt": ISO-8601 }` | no | Free full resets of the rate limits that the provider granted and the person can still redeem (Omarchy's Codex collector reports OpenAI's `rateLimitResetCredits` this way; this plugin's `omarchy-agent-usage-claude-compat` reports Claude's saved resets from the usage response's `cedar_ember` block the same way). `available` < 1 or malformed reads as none; `available` is capped at 99 and an unparsable `nextExpiresAt` is dropped. Shown as a row in the Usage view, never in the bar. |
+| `resetCredits` | object | no | Free full resets the provider granted and the account can redeem. See "Free reset credits" below. |
 | `cost` | object | no | An optional, derived estimate of what usage would cost at published API rates — not a real bill. See "Cost" below. |
 | `todayPrompts` | integer | no | Number of prompts sent today (local time). Leave at `0`/omit when `hasPromptStats` is `false`. |
 | `todaySessions` | integer | no | Number of distinct sessions today. |
@@ -243,6 +243,30 @@ intended for the Claude and Codex transcript collectors. When a transcript
 has both priced and unknown models, it emits a clearly marked partial subtotal
 with `unknownModels`; when every used model is unknown it emits no cost at all.
 It never guesses a price from a similarly named model.
+
+## Free reset credits
+
+```json
+{
+  "available": 3,
+  "nextExpiresAt": "2026-12-10T22:00:00Z",
+  "expiries": ["2026-12-10T22:00:00Z", "2026-12-15T17:00:00Z", ""]
+}
+```
+
+- `available` is the count at collection time, capped at 99. Omit the
+  block when the account has no redeemable credits.
+- `expiries` lists one timestamp per credit, including repeated timestamps.
+  Use ISO-8601 with an explicit time zone and `""` when the provider has
+  no date for a credit. Keep `nextExpiresAt` as the earliest known expiry
+  (or `""`) for older clients.
+- For older records that only have `nextExpiresAt`, Usage displays that
+  date and marks the remaining dates as unreported. The panel removes known
+  expired credits from the list and the count while open.
+- Reset credits belong to the selected account's local record. They appear
+  in Usage and are omitted from sync snapshots and the bar. The bundled
+  compatibility collectors report them for Claude and Codex.
+
 
 ## Error states
 

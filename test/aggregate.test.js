@@ -216,6 +216,11 @@ test("mergeProviderDisplay: a Codex endpoint-down record surfaces its own help t
   assert.match(display.authHelpText, /app-server RPC/)
 })
 
+test("a provider with only reset credits is discoverable", () => {
+  const display = Aggregate.mergeProviderDisplay({ id: "custom", resetCredits: { available: 1 } }, null, {})
+  assert.equal(Aggregate.providerHasData(display), true)
+})
+
 test("providerHasData: a first-run auth or endpoint state remains visible", () => {
   assert.equal(Aggregate.providerHasData({ ready: false, usageStatusText: "Waiting for API key" }), true)
   assert.equal(Aggregate.providerHasData({ ready: false, usageStatusText: "" }), false)
@@ -691,4 +696,26 @@ test("resetCreditsValue keeps only redeemable free resets", () => {
   const merged = Aggregate.mergeProviderDisplay({ id: "codex", resetCredits: { available: 1 } }, null, {})
   assert.deepEqual(merged.resetCredits, { available: 1, nextExpiresAt: "" })
   assert.equal(Aggregate.mergeProviderDisplay({ id: "claude" }, null, {}).resetCredits, null)
+})
+
+test("active reset credits keep every reported expiry, including matching dates", () => {
+  const now = Date.parse("2026-11-27T12:00:00Z")
+  const first = "2026-11-28T10:00:00Z"
+  const last = "2026-12-10T22:00:00+00:00"
+  const credits = Aggregate.resetCreditsValue({
+    available: 7,
+    nextExpiresAt: first,
+    expiries: [last, "2026-02-30T00:00:00Z", first, null, first, "2026-11-27T12:00:00Z", "bad"]
+  })
+  assert.deepEqual(Aggregate.activeResetExpiries(credits, now), [
+    Date.parse(first), Date.parse(first), Date.parse(last), null, null, null
+  ])
+  assert.deepEqual(Aggregate.activeResetExpiries(credits, Date.parse(last)), [null, null, null])
+  assert.deepEqual(Aggregate.activeResetExpiries(Aggregate.resetCreditsValue({
+    available: 2, nextExpiresAt: first
+  }), now), [Date.parse(first), null])
+  assert.deepEqual(Aggregate.activeResetExpiries(Aggregate.resetCreditsValue({
+    available: 1, nextExpiresAt: first
+  }), Date.parse(first)), [])
+  assert.deepEqual(Aggregate.activeResetExpiries(null, now), [])
 })

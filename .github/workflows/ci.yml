@@ -96,4 +96,4 @@ jobs:
 
       - name: Run collector tests
         working-directory: collectors
-        run: python3 -m unittest tests.test_collectors
+        run: python3 -m unittest discover -s tests

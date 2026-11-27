@@ -55,15 +55,15 @@ for arg in "$@"; do
   [[ $arg == --force || $arg == --limits-only ]] && flags+=("$arg")
 done
 
-publish() {
+publish() (
   local agent="$1" record="$2" temporary
-  jq -e 'type == "object"' >/dev/null <<<"$record" || return 1
-  mkdir -p "$usage_dir"
-  temporary=$(mktemp "$usage_dir/.$agent.XXXXXX")
-  printf '%s\n' "$record" >"$temporary"
-  chmod 0600 "$temporary"
-  mv "$temporary" "$usage_dir/$agent.json"
-}
+  jq -es --arg id "$agent" 'length == 1 and (.[0] | type == "object" and .id == $id)' >/dev/null <<<"$record" || return 1
+  mkdir -p "$usage_dir" || return 1
+  temporary=$(mktemp "$usage_dir/.$agent.XXXXXX") || return 1
+  trap 'rm -f -- "$temporary"' EXIT
+  printf '%s\n' "$record" >"$temporary" || return 1
+  mv -- "$temporary" "$usage_dir/$agent.json"
+)
 
 refresh_claude() {
   local record
@@ -94,13 +94,12 @@ if $claude_wanted; then
   claude_pid=$!
 fi
 
-if $codex_wanted; then
-  record=$("$codex_collector" "${flags[@]}")
-  jq -e . >/dev/null <<<"$record"
-  publish codex "$record"
-fi
-
 status=0
+if $codex_wanted; then
+  if ! record=$("$codex_collector" "${flags[@]}") || ! publish codex "$record"; then
+    status=1
+  fi
+fi
 wait "$packaged_pid" || status=$?
 if [[ -n $claude_pid ]]; then
   wait "$claude_pid" || status=1

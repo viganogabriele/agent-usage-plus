@@ -50,7 +50,10 @@ class ResetExpiryTests(unittest.TestCase):
         expiries = compat.reset_expiries(block, NOW)
         self.assertEqual(sorted(expiries), ["", "2026-12-10T22:00:00+00:00", "2026-12-10T22:00:00+00:00"])
         self.assertNotIn("secret", json.dumps(expiries))
-        self.assertEqual(compat.summary(expiries, NOW), {"available": 3, "nextExpiresAt": "2026-12-10T22:00:00+00:00"})
+        self.assertEqual(compat.summary(expiries, NOW), {
+            "available": 3, "nextExpiresAt": "2026-12-10T22:00:00+00:00",
+            "expiries": ["2026-12-10T22:00:00+00:00", "2026-12-10T22:00:00+00:00", ""],
+        })
 
     def test_ineligible_absent_or_oversized_blocks_say_nothing(self):
         for block in (None, "x", {"eligible": False, "grants": [grant()]},
@@ -63,7 +66,7 @@ class ResetExpiryTests(unittest.TestCase):
     def test_a_reset_that_expired_since_the_probe_drops_out(self):
         expiries = ["2026-11-26T13:00:00+00:00", ""]
         later = NOW + dt.timedelta(hours=2)
-        self.assertEqual(compat.summary(expiries, later), {"available": 1, "nextExpiresAt": ""})
+        self.assertEqual(compat.summary(expiries, later), {"available": 1, "nextExpiresAt": "", "expiries": [""]})
 
 
 class TrackerTests(unittest.TestCase):
@@ -97,7 +100,10 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(sent.get_header("Authorization"), "Bearer token-a")
         self.assertEqual(sent.get_header("User-agent"), "claude-cli/2.1.332 (external, cli)")
         ns["emit"]({"id": "claude", "limits": []})
-        self.assertEqual(self.emitted[0]["resetCredits"], {"available": 1, "nextExpiresAt": "2026-12-10T22:00:00+00:00"})
+        self.assertEqual(self.emitted[0]["resetCredits"], {
+            "available": 1, "nextExpiresAt": "2026-12-10T22:00:00+00:00",
+            "expiries": ["2026-12-10T22:00:00+00:00"],
+        })
         stored = Path(compat.cache_path()).read_text()
         self.assertNotIn("secret", stored)
         self.assertNotIn("token", stored)
@@ -146,6 +152,34 @@ class TrackerTests(unittest.TestCase):
         self.probe(ns, "token-b")
         ns["emit"]({"id": "claude"})
         self.assertNotIn("resetCredits", self.emitted[0])
+
+    def test_native_accounts_keep_their_own_resets_even_on_cache_hits(self):
+        ns = self.namespace(lambda r: {"cedar_ember": {"eligible": True, "grants": [
+            grant(2 if r.get_header("Authorization") == "Bearer work" else 1),
+        ]}})
+        def collect_limits(token, expires_at, refresh_expires_at, force, cache_name="claude-limits.json"):
+            if force:
+                self.probe(ns, token)
+            return {"live": bool(token)}
+
+        def account_entry(account, limits, plan, **extra):
+            return dict(account, **extra)
+
+        original_open, original_emit = ns["open_json"], ns["emit"]
+        for fresh in (True, False):
+            # Omarchy lists the active account first, so the last probe is
+            # not necessarily the one that the top-level record describes.
+            ns.update(collect_limits=collect_limits, account_entry=account_entry)
+            ns["open_json"] = original_open
+            ns["emit"] = original_emit
+            compat.Tracker(ns, now=NOW, version="2.1.0").install()
+            accounts = []
+            for token in ("work", "personal"):
+                limits = ns["collect_limits"](token, 0, 0, fresh, "claude-limits-" + token + ".json")
+                accounts.append(ns["account_entry"]({"active": token == "work"}, limits, "Max"))
+            ns["emit"]({"id": "claude", "accounts": accounts})
+            self.assertEqual(self.emitted[-1]["resetCredits"]["available"], 2)
+            self.assertEqual([a["resetCredits"]["available"] for a in accounts], [2, 1])
 
     def test_other_requests_pass_through_untouched(self):
         ns = self.namespace(lambda r: {"ok": True})

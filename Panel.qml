@@ -383,7 +383,7 @@ Panel {
 
   // Where a granted free reset is redeemed; the panel only reports them.
   function redeemHint(p) {
-    var id = p ? String(p.providerId || "") : ""
+    var id = p ? (p.brand || p.providerId) : ""
     if (id === "codex") return "Redeem with /usage in Codex"
     if (id === "claude") return "Redeem in claude.ai Settings › Usage"
     return ""
@@ -2471,12 +2471,11 @@ Panel {
           // how many and how long they last. Where to redeem is on hover.
           BorderSurface {
             id: freeResetsCard
-            readonly property var credits: root.provider ? root.provider.resetCredits : null
-            readonly property real expiresMs: credits ? Date.parse(String(credits.nextExpiresAt || "")) - root.nowMs : NaN
+            readonly property var expiries: Aggregate.activeResetExpiries(root.provider ? root.provider.resetCredits : null, root.nowMs)
             opacity: root.viewFade
-            visible: root.viewTab === "usage" && !root.settingsOpen && !!credits && credits.available > 0
+            visible: root.viewTab === "usage" && !root.settingsOpen && expiries.length > 0
             width: parent.width
-            implicitHeight: Math.max(freeResetsCount.implicitHeight, freeResetsLeft.implicitHeight) + Style.space(24)
+            implicitHeight: Math.max(freeResetsCount.implicitHeight, freeResetDates.implicitHeight) + Style.space(24)
             color: root.alpha(root.foreground, 0.035)
             borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
             radius: root.cardRadius
@@ -2485,32 +2484,41 @@ Panel {
               id: freeResetsCount
               anchors.left: parent.left
               anchors.leftMargin: Style.space(14)
-              anchors.right: freeResetsLeft.left
+              anchors.right: freeResetDates.left
               anchors.rightMargin: Style.space(10)
-              anchors.verticalCenter: parent.verticalCenter
+              anchors.top: freeResetDates.top
               elide: Text.ElideRight
-              text: freeResetsCard.credits ? freeResetsCard.credits.available + " free reset"
-                + (freeResetsCard.credits.available === 1 ? "" : "s") : ""
+              text: freeResetsCard.expiries.length + " free reset" + (freeResetsCard.expiries.length === 1 ? "" : "s")
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               font.bold: true
             }
 
-            Text {
-              id: freeResetsLeft
+            Column {
+              id: freeResetDates
               anchors.right: parent.right
               anchors.rightMargin: Style.space(14)
               anchors.verticalCenter: parent.verticalCenter
-              visible: text !== ""
-              text: {
-                var ms = freeResetsCard.expiresMs
-                if (!(ms > 0)) return ""
-                return root.formatDuration(ms) + " left"
+              spacing: Style.space(4)
+
+              Repeater {
+                model: freeResetsCard.expiries.length
+                Text {
+                  required property int index
+                  readonly property var expiry: freeResetsCard.expiries[index]
+                  readonly property real remaining: expiry == null ? 0 : expiry - root.nowMs
+                  anchors.right: parent.right
+                  text: {
+                    if (expiry == null) return "Expiry not reported"
+                    var parts = root.momentParts(expiry)
+                    return root.formatDuration(remaining) + " left · " + parts.day + " " + parts.clock
+                  }
+                  color: remaining > 0 && remaining < 2 * 86400000 ? root.warnText : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
               }
-              color: freeResetsCard.expiresMs > 0 && freeResetsCard.expiresMs < 2 * 86400000 ? root.warnText : root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
             }
 
             MouseArea {
@@ -2687,6 +2695,7 @@ Panel {
                   required property int index
                   readonly property bool current: !!root.provider && root.provider.providerId === modelData.providerId
                   readonly property var meter: root.chipMeter(modelData)
+                  readonly property int freeResetCount: Aggregate.activeResetExpiries(modelData.resetCredits, root.nowMs).length
                   readonly property var next: {
                     var windows = root.limitWindows(modelData)
                     var best = null
@@ -2761,8 +2770,8 @@ Panel {
                         : root.providerPercentText(accountRow.modelData)
                           + (accountRow.next ? " · " + String(accountRow.next.title || "Limit").toLowerCase()
                             + " resets in " + root.formatDuration(root.resetMsFor(accountRow.next)) : "")
-                          + (accountRow.modelData.resetCredits ? " · " + accountRow.modelData.resetCredits.available
-                            + " free reset" + (accountRow.modelData.resetCredits.available === 1 ? "" : "s") : "")
+                          + (accountRow.freeResetCount > 0 ? " · " + accountRow.freeResetCount
+                            + " free reset" + (accountRow.freeResetCount === 1 ? "" : "s") : "")
                       textFormat: Text.PlainText
                       color: String(accountRow.modelData.usageStatusText || "") !== ""
                         ? root.textFor(root.statusColor(accountRow.modelData)) : root.dim
@@ -2795,7 +2804,8 @@ Panel {
             id: emptyViewCard
             opacity: root.viewFade
             readonly property bool viewEmpty: root.viewTab === "usage"
-              ? !(todayTiles.visible || balanceSection.visible || limitsSection.visible || accountsCard.visible)
+              ? !(root.ringWindows.length > 0 || todayTiles.visible || freeResetsCard.visible
+                || balanceSection.visible || limitsSection.visible || accountsCard.visible)
               : root.viewTab === "activity" ? !(activityCard.visible || historyCard.visible)
               : root.viewTab === "models" ? !(tokenMixCard.visible || detailModelSection.visible)
               : !costSection.visible
@@ -5532,7 +5542,7 @@ Panel {
       ? Commons.Color.accent : root.colorForSeverity(root.balanceSeverity) : tint
     readonly property real resetMs: creditMode ? -1 : root.resetMsFor(window)
     readonly property var resetParts: root.momentParts(resetMs > 0 ? root.nowMs + resetMs : NaN)
-    readonly property bool full: !creditMode && hasValue && window.percent >= 1
+    readonly property bool full: !creditMode && !!window && window.percent >= 1
     readonly property bool runsOut: !full && !stale && resetMs > 0 && !!pace && pace.runsOutInMs >= 0
     readonly property string resetLead: stale ? "Window reset" : (resetMs > 0 ? (full ? "Back in" : "Resets in") : "No reset reported")
     readonly property string resetValue: !stale && resetMs > 0 ? root.formatDuration(resetMs) : ""

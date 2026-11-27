@@ -213,16 +213,7 @@ test("plugin updater keeps account settings out of Omarchy's updater arguments",
   assert.doesNotMatch(fs.readFileSync(calls, "utf8"), /profiles-json/)
 })
 
-test("plugin updater reaches the real packaged updater through an installed --codex-cli-compat override, not itself", t => {
-  // Regression for a reviewed-but-unreproduced recursion concern: the
-  // plugin dispatcher's own local_updater auto-detection (no
-  // AGENT_USAGE_PLUS_BASE_UPDATER override, exactly how Main.qml invokes it)
-  // must resolve the installed ~/.local/bin/omarchy-agent-usage-update to the
-  // safe compat wrapper the installer actually links it to, not back into
-  // itself. `install.sh --codex-cli-compat` already targets the wrapper (see
-  // "compat installer links both the collector and updater" above); this
-  // proves the full default-detection chain reaches the real packaged
-  // updater end to end instead of spinning or silently doing nothing.
+test("the plugin uses its current updater even when an older companion is installed", t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-usage-e2e-"))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const bin = path.join(root, "bin")
@@ -241,10 +232,13 @@ test("plugin updater reaches the real packaged updater through an installed --co
     env: { ...process.env, XDG_BIN_HOME: bin, XDG_DATA_HOME: data },
   })
 
+  executable(path.join(data, "agent-usage-plus-collectors", "bin", "omarchy-agent-usage-update"), "exit 42")
+
   execFileSync("bash", [pluginUpdater, "--force"], {
     env: {
       ...process.env,
       XDG_BIN_HOME: bin,
+      XDG_DATA_HOME: data,
       XDG_STATE_HOME: path.join(root, "state"),
       AGENT_USAGE_PLUS_PACKAGED_UPDATER: packaged,
       AGENT_USAGE_PLUS_CODEX_COLLECTOR: codex,
@@ -294,5 +288,13 @@ test("a failing Claude reader hands Claude back to the packaged updater", t => {
   const result = claudeHarness(["--force"], "exit 3")
   t.after(() => fs.rmSync(result.root, { recursive: true, force: true }))
   assert.deepEqual(result.calls, ["claude:--force", "packaged:--except codex --except claude --force", "packaged:--force claude"])
+  assert.equal(fs.existsSync(result.record), false)
+})
+
+
+test("an invalid Claude record leaves the packaged updater responsible for Claude", t => {
+  const result = claudeHarness(["--force", "claude"], `printf '%s\n' '{"id":"other","limits":[]}'`)
+  t.after(() => fs.rmSync(result.root, { recursive: true, force: true }))
+  assert.ok(result.calls.includes("packaged:--force claude"))
   assert.equal(fs.existsSync(result.record), false)
 })

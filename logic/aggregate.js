@@ -180,19 +180,44 @@ function balanceValue(raw) {
   }
 }
 
-// Free full resets the provider has granted and the person can still
-// redeem (Codex's "rateLimitResetCredits", reported by Omarchy's collector
-// as { available, nextExpiresAt }). Per-account like `limits`; anything
-// malformed or empty reads as "none", never as an error.
+function resetExpiryMs(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z|[+-]\d{2}:\d{2})$/.test(value)
+      || calendarDate(value) === "") return NaN
+  return Date.parse(value)
+}
+
+// Free full resets are per-account, like limits. Old records report only
+// the first dated expiry. Keep their other credits with an unknown date.
 function resetCreditsValue(raw) {
   if (!raw || typeof raw !== "object") return null
   var available = Math.floor(strictNumber(raw.available))
   if (!isFinite(available) || available < 1) return null
-  var expires = sanitizeDisplayText(raw.nextExpiresAt, 40)
-  return {
-    available: Math.min(available, 99),
-    nextExpiresAt: isFinite(Date.parse(expires)) ? expires : ""
+  available = Math.min(available, 99)
+  var next = isFinite(resetExpiryMs(raw.nextExpiresAt)) ? raw.nextExpiresAt : ""
+  var out = { available: available, nextExpiresAt: next }
+  if (Array.isArray(raw.expiries)) {
+    out.expiries = raw.expiries.slice(0, available).map(function(value) {
+      return isFinite(resetExpiryMs(value)) ? value : ""
+    })
   }
+  return out
+}
+
+// Milliseconds sorted soonest first, with undated credits at the end. A
+// repeated timestamp represents separate grants and is intentionally kept.
+function activeResetExpiries(credits, nowMs) {
+  if (!credits) return []
+  var reported = credits.expiries || [credits.nextExpiresAt]
+  var dated = []
+  var undated = credits.available - reported.length
+  for (var i = 0; i < reported.length; i++) {
+    var expiry = resetExpiryMs(reported[i])
+    if (!isFinite(expiry)) undated++
+    else if (expiry > nowMs) dated.push(expiry)
+  }
+  dated.sort(function(a, b) { return a - b })
+  while (undated-- > 0) dated.push(null)
+  return dated
 }
 
 // An optional, collector-reported *derived estimate* of what usage would
@@ -784,7 +809,7 @@ function providerHasData(p) {
   return numberValue(p.totalPrompts) > 0 || numberValue(p.totalSessions) > 0
     || numberValue(p.activeDays) > 0 || numberValue(p.todayPrompts) > 0
     || numberValue(p.todaySessions) > 0 || (p.limits && p.limits.length > 0)
-    || !!p.balance || !!p.cost || p.ready === true
+    || !!p.balance || !!p.cost || !!p.resetCredits || p.ready === true
     // An auth or endpoint problem is itself useful state. In particular, a
     // newly installed API-backed collector has no historical local stats to
     // keep it visible, so suppressing this made the documented error record
@@ -805,6 +830,7 @@ if (typeof module !== "undefined" && module.exports) {
     sanitizeDeviceId: sanitizeDeviceId,
     balanceValue: balanceValue,
     resetCreditsValue: resetCreditsValue,
+    activeResetExpiries: activeResetExpiries,
     costValue: costValue,
     dateString: dateString,
     recentDateStrings: recentDateStrings,

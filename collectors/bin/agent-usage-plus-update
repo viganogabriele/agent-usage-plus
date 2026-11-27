@@ -10,7 +10,10 @@ account_runner="$script_dir/agent-usage-plus-accounts"
 
 if [[ -z $base_updater ]]; then
   local_updater=${XDG_BIN_HOME:-"$HOME/.local/bin"}/omarchy-agent-usage-update
-  if [[ -x $local_updater ]]; then
+  installed_updater=${XDG_DATA_HOME:-"$HOME/.local/share"}/agent-usage-plus-collectors/bin/omarchy-agent-usage-update
+  # An older companion's symlink must not bypass fixes in this checkout.
+  # Keep honoring independently installed local overrides.
+  if [[ -x $local_updater && $(readlink -f -- "$local_updater") != "$(readlink -f -- "$installed_updater")" ]]; then
     base_updater=$local_updater
   else
     base_updater="$script_dir/omarchy-agent-usage-update"

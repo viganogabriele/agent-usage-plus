@@ -12,6 +12,7 @@ Remove the user-level symlink created by ``install.sh --codex-cli-compat`` to
 return to Omarchy's collector once the upstream package has caught up.
 """
 
+from datetime import datetime, timezone
 from pathlib import Path
 import os
 import sys
@@ -36,6 +37,10 @@ PACKAGED_COLLECTOR = Path(
 # itself (OLD absent), applied when OLD appears exactly once, and refused
 # when the surrounding source no longer matches what the patch expects.
 PATCHES = [
+    (
+        "credits = reset_credits(rpc_result)",
+        "credits = agent_usage_plus_reset_credits(rpc_result)",
+    ),
     (
         '    ready, _, _ = select.select([proc.stdout], [], [], 0.25)\n'
         '    if not ready:\n'
@@ -119,6 +124,38 @@ PATCHES = [
 ]
 
 
+def reset_credits(result, now=None):
+    """One expiry per available app-server credit, without its identifier."""
+    grants = result.get("rateLimitResetCredits")
+    credits = grants.get("credits") if isinstance(grants, dict) else None
+    if not isinstance(credits, list):
+        return None
+    now = now if now is not None else datetime.now(timezone.utc)
+    dated = []
+    undated = 0
+    for credit in credits:
+        if not isinstance(credit, dict) or credit.get("status") != "available":
+            continue
+        value = credit.get("expiresAt")
+        expiry = None
+        if isinstance(value, (int, float, str)) and not isinstance(value, bool):
+            try:
+                seconds = float(value)
+                if seconds > 0:
+                    expiry = datetime.fromtimestamp(seconds, timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                pass
+        if expiry is None:
+            undated += 1
+        elif expiry > now:
+            dated.append(expiry)
+    expiries = [expiry.isoformat() for expiry in sorted(dated)[:99]]
+    expiries += [""] * min(undated, 99 - len(expiries))
+    if not expiries:
+        return None
+    return {"available": len(expiries), "nextExpiresAt": expiries[0], "expiries": expiries}
+
+
 def main():
     try:
         source = PACKAGED_COLLECTOR.read_text(encoding="utf-8")
@@ -149,10 +186,14 @@ def main():
         else:
             install()
 
-    namespace = {"__name__": "__main__", "__file__": str(PACKAGED_COLLECTOR)}
+    namespace = {
+        "__name__": "__main__",
+        "__file__": str(PACKAGED_COLLECTOR),
+        "agent_usage_plus_reset_credits": reset_credits,
+    }
     exec(compile(replacement, str(PACKAGED_COLLECTOR), "exec"), namespace)
     return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
