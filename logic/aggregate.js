@@ -66,15 +66,37 @@ function sanitizeDisplayText(raw, maxLen) {
 
 // Rate-limit windows come straight from a usage record; cap how many are
 // trusted and sanitize the free-text fields before they reach LimitRow.
+// A number only when the value really is one: unlike Number(), null, "",
+// booleans and arrays do not quietly become 0.
+function strictNumber(value) {
+  if (typeof value === "number") return value
+  if (typeof value === "string" && value.trim() !== "") return Number(value)
+  return NaN
+}
+
+// A real calendar day as "YYYY-MM-DD" from the start of `value`, or "".
+// 2026-02-30 is rejected rather than rolled over into March.
+function calendarDate(value) {
+  var match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value || ""))
+  if (!match) return ""
+  var y = Number(match[1]), m = Number(match[2]), d = Number(match[3])
+  var date = new Date(Date.UTC(y, m - 1, d))
+  if (date.getUTCFullYear() !== y || date.getUTCMonth() !== m - 1 || date.getUTCDate() !== d) return ""
+  return match[0]
+}
+
 function sanitizeLimits(raw) {
   var list = Array.isArray(raw) ? raw : []
   var out = []
   for (var i = 0; i < list.length && out.length < 20; i++) {
     var entry = list[i] || {}
+    // Contract: a missing or negative percent drops the entry entirely.
+    var percent = strictNumber(entry.percent)
+    if (!isFinite(percent) || percent < 0) continue
     out.push({
       label: sanitizeDisplayText(entry.label, 80),
       title: sanitizeDisplayText(entry.title, 80),
-      percent: entry.percent,
+      percent: percent,
       tokenLimit: numberValue(entry.tokenLimit),
       resetsAt: sanitizeDisplayText(entry.resetsAt, 40),
       // Optional, but required for a defensible pace projection: guessing a
@@ -86,9 +108,19 @@ function sanitizeLimits(raw) {
   return out
 }
 
+// Valid days only, oldest first as the contract orders them; when over the
+// cap the newest 31 are kept, since the series ends on today.
 function capRecentDays(raw) {
   var list = Array.isArray(raw) ? raw : []
-  return list.length > 31 ? list.slice(0, 31) : list
+  var out = []
+  for (var i = 0; i < list.length && i < 400; i++) {
+    var day = list[i]
+    if (!day || typeof day !== "object") continue
+    var date = calendarDate(day.date)
+    if (date === "") continue
+    out.push({ date: date, messageCount: numberValue(day.messageCount) })
+  }
+  return out.length > 31 ? out.slice(out.length - 31) : out
 }
 
 // Bounds how many distinct model ids a single record/snapshot can push into
@@ -136,7 +168,7 @@ function sanitizeDeviceId(raw, fallback) {
 // per-account and never merged across devices.
 function balanceValue(raw) {
   if (!raw || typeof raw !== "object") return null
-  var remaining = Number(raw.remaining)
+  var remaining = strictNumber(raw.remaining)
   var funded = Number(raw.funded)
   if (!isFinite(remaining) || remaining < 0) return null
   return {
@@ -148,6 +180,46 @@ function balanceValue(raw) {
   }
 }
 
+function resetExpiryMs(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z|[+-]\d{2}:\d{2})$/.test(value)
+      || calendarDate(value) === "") return NaN
+  return Date.parse(value)
+}
+
+// Free full resets are per-account, like limits. Old records report only
+// the first dated expiry. Keep their other credits with an unknown date.
+function resetCreditsValue(raw) {
+  if (!raw || typeof raw !== "object") return null
+  var available = Math.floor(strictNumber(raw.available))
+  if (!isFinite(available) || available < 1) return null
+  available = Math.min(available, 99)
+  var next = isFinite(resetExpiryMs(raw.nextExpiresAt)) ? raw.nextExpiresAt : ""
+  var out = { available: available, nextExpiresAt: next }
+  if (Array.isArray(raw.expiries)) {
+    out.expiries = raw.expiries.slice(0, available).map(function(value) {
+      return isFinite(resetExpiryMs(value)) ? value : ""
+    })
+  }
+  return out
+}
+
+// Milliseconds sorted soonest first, with undated credits at the end. A
+// repeated timestamp represents separate grants and is intentionally kept.
+function activeResetExpiries(credits, nowMs) {
+  if (!credits) return []
+  var reported = credits.expiries || [credits.nextExpiresAt]
+  var dated = []
+  var undated = credits.available - reported.length
+  for (var i = 0; i < reported.length; i++) {
+    var expiry = resetExpiryMs(reported[i])
+    if (!isFinite(expiry)) undated++
+    else if (expiry > nowMs) dated.push(expiry)
+  }
+  dated.sort(function(a, b) { return a - b })
+  while (undated-- > 0) dated.push(null)
+  return dated
+}
+
 // An optional, collector-reported *derived estimate* of what usage would
 // cost at published API rates (issue #12) — never a real ledger figure the
 // way `balance` is, which is why the panel always labels it as an estimate
@@ -155,7 +227,7 @@ function balanceValue(raw) {
 // per-account and never merged across synced devices.
 function costValue(raw) {
   if (!raw || typeof raw !== "object") return null
-  var estimateUsd = Number(raw.estimateUsd)
+  var estimateUsd = strictNumber(raw.estimateUsd)
   if (!isFinite(estimateUsd) || estimateUsd < 0) return null
 
   var byModelIn = Array.isArray(raw.byModel) ? raw.byModel : []
@@ -264,14 +336,12 @@ function combineTokenBuckets(additive, target, source) {
 // feature builds on top of this merge.
 function aggregateSnapshots(snapshots, maxSnapshots) {
   var snapshotLimit = maxSnapshots || 50
-  var dates = recentDateStrings()
   var devices = safeMap()
   var providers = safeMap()
 
   function providerAcc(id) {
     if (providers[id]) return providers[id]
     var recentByDay = safeMap()
-    for (var d = 0; d < dates.length; d++) recentByDay[dates[d]] = 0
     providers[id] = {
       providerId: id,
       providerName: "",
@@ -343,12 +413,13 @@ function aggregateSnapshots(snapshots, maxSnapshots) {
         combineTokenBuckets(additive, todayBucket, todayUsage[todayModelId])
       }
 
-      var recent = Array.isArray(stats.recentDays) ? stats.recentDays : []
-      for (var r = 0; r < recent.length && r < 366; r++) {
-        var day = recent[r] || {}
-        var date = String(day.date || "")
-        if (acc.recentByDay[date] !== undefined)
-          acc.recentByDay[date] = combineNumber(additive, acc.recentByDay[date], day.messageCount)
+      // Keep every day a device actually reported (up to the 31-day cap
+      // applied below); a day nobody reported stays missing, not zero.
+      var recent = capRecentDays(stats.recentDays)
+      for (var r = 0; r < recent.length; r++) {
+        var date = recent[r].date
+        if (acc.recentByDay[date] === undefined && Object.keys(acc.recentByDay).length >= 400) continue
+        acc.recentByDay[date] = combineNumber(additive, acc.recentByDay[date], recent[r].messageCount)
       }
 
       var usage = capModelUsage(stats.modelUsage)
@@ -363,8 +434,10 @@ function aggregateSnapshots(snapshots, maxSnapshots) {
   var outProviders = safeMap()
   for (var id in providers) {
     var acc2 = providers[id]
+    var dayKeys = Object.keys(acc2.recentByDay).sort()
+    if (dayKeys.length > 31) dayKeys = dayKeys.slice(dayKeys.length - 31)
     var recentDays = []
-    for (var di = 0; di < dates.length; di++) recentDays.push({ date: dates[di], messageCount: acc2.recentByDay[dates[di]] || 0 })
+    for (var di = 0; di < dayKeys.length; di++) recentDays.push({ date: dayKeys[di], messageCount: acc2.recentByDay[dayKeys[di]] })
     var providerDevices = Object.keys(acc2.devices).sort()
     outProviders[id] = {
       providerId: acc2.providerId,
@@ -503,6 +576,7 @@ function mergeProviderDisplay(record, stats, aggregateMeta) {
     limits: sanitizeLimits(record.limits),
     tierLabel: sanitizeDisplayText(record.tierLabel, 60),
     balance: balanceValue(record.balance),
+    resetCredits: resetCreditsValue(record.resetCredits),
     cost: costValue(record.cost),
 
     todayPrompts: synced ? numberValue(stats.todayPrompts) : numberValue(record.todayPrompts),
@@ -516,6 +590,10 @@ function mergeProviderDisplay(record, stats, aggregateMeta) {
     modelUsage: synced ? capModelUsage(stats.modelUsage) : capModelUsage(record.modelUsage),
     hasLocalStats: synced ? (stats.hasLocalStats !== false) : (record.hasLocalStats !== false),
     hasPromptStats: synced ? (stats.hasPromptStats !== false) : (record.hasPromptStats !== false),
+
+    // The collector's own last-run timestamp, for the panel's "updated …
+    // ago" line. A free-form string here; the panel parses it defensively.
+    updatedAt: sanitizeDisplayText(record.updatedAt, 40),
 
     syncEnabled: synced,
     syncDeviceCount: deviceCount,
@@ -731,7 +809,7 @@ function providerHasData(p) {
   return numberValue(p.totalPrompts) > 0 || numberValue(p.totalSessions) > 0
     || numberValue(p.activeDays) > 0 || numberValue(p.todayPrompts) > 0
     || numberValue(p.todaySessions) > 0 || (p.limits && p.limits.length > 0)
-    || !!p.balance || !!p.cost || p.ready === true
+    || !!p.balance || !!p.cost || !!p.resetCredits || p.ready === true
     // An auth or endpoint problem is itself useful state. In particular, a
     // newly installed API-backed collector has no historical local stats to
     // keep it visible, so suppressing this made the documented error record
@@ -751,6 +829,8 @@ if (typeof module !== "undefined" && module.exports) {
     cloneValue: cloneValue,
     sanitizeDeviceId: sanitizeDeviceId,
     balanceValue: balanceValue,
+    resetCreditsValue: resetCreditsValue,
+    activeResetExpiries: activeResetExpiries,
     costValue: costValue,
     dateString: dateString,
     recentDateStrings: recentDateStrings,

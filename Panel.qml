@@ -3,6 +3,7 @@ import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "logic/thresholds.js" as Thresholds
 import "logic/format.js" as Format
@@ -14,6 +15,9 @@ import "logic/pace.js" as Pace
 import "logic/cost-analytics.js" as CostAnalytics
 import "logic/notifications.js" as Notify
 import "logic/meter-colors.js" as MeterColors
+import "logic/insights.js" as Insights
+import "logic/contrast.js" as Contrast
+import "logic/series-colors.js" as SeriesColors
 
 Panel {
   id: root
@@ -21,8 +25,8 @@ Panel {
   ipcTarget: "io.github.viganogabriele.agent-usage-plus"
   manageIpc: false
 
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
-  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
+  readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
   // The stable traffic-light colors are opt-in. With the option off, healthy
   // meters retain the live foreground and Critical retains Omarchy's urgent
   // color, preserving the widget's original theme contract.
@@ -32,9 +36,27 @@ Panel {
   // as its own distinct traffic-light color at a glance, not a paler shade
   // of critical that's easy to mistake for it against a dim theme.
   readonly property color warn: "#F2B705"
-  readonly property color dim: Qt.darker(foreground, 1.55)
-  readonly property color surface: Color.popups.background
-  readonly property color track: Style.selectedFillFor(foreground, Color.accent)
+  // The panel's own softness, independent of Hyprland's window rounding:
+  // with sharp windows (rounding 0) every card and control read as hard
+  // boxes. The shell's card frame itself still follows the theme.
+  readonly property real cardRadius: Math.max(Style.cornerRadius, Style.space(12))
+  readonly property real controlRadius: Math.max(Style.cornerRadius, Style.space(8))
+  readonly property color surface: Commons.Color.popups.background
+  // Secondary panel text. A fixed Qt.darker(foreground) fell below a 4.5:1
+  // contrast on several dark themes (Everforest, Gruvbox, Tokyo Night, Nord)
+  // and, on light themes, came out *darker* than the primary text so it read
+  // as emphasis. Blending toward the surface keeps it visibly secondary in
+  // both modes; readableOn() then guarantees it stays legible.
+  readonly property color dim: readableOn(mix(foreground, surface, 0.38), surface, 4.5)
+  // The bar keeps its original secondary color (only the rare "+N" overflow
+  // uses it), so the bar renders exactly as before.
+  readonly property color barDim: Qt.darker(foreground, 1.55)
+  // Text versions of the state colors. Meters and fills keep the exact
+  // theme/amber colors; only text is nudged when a theme puts it below 4.5:1
+  // (the fixed amber is ~1.7:1 on every light theme).
+  readonly property color warnText: readableOn(warn, surface, 4.5)
+  readonly property color accentText: readableOn(Commons.Color.accent, surface, 4.5)
+  readonly property color track: Style.selectedFillFor(foreground, Commons.Color.accent)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   readonly property var providers: usage.enabledProviders
@@ -67,12 +89,6 @@ Panel {
   readonly property var accountRows: providers.filter(function(p) {
     return (p.brand || p.providerId) === root.accountBrand
   })
-  readonly property var configuredAccounts: {
-    var rows = []
-    var profiles = usage.accountProfiles
-    for (var id in profiles) rows.push({ id: id, provider: profiles[id].provider, name: profiles[id].name, path: profiles[id].path || "" })
-    return rows.sort(function(a, b) { return a.id.localeCompare(b.id) })
-  }
   function accountRecordExists(id) {
     var revision = usage.dataRevision
     var agents = usage.agents || []
@@ -83,27 +99,29 @@ Panel {
 
   property bool cursorActive: false
 
-  // Each opening uses the saved preference; manual toggles are session-only.
+  // Each opening uses the saved preference; tab switches are session-only.
   //
-  // `expanded` (cross-provider data) and `settingsOpen` (the settings form)
-  // are mutually exclusive so the panel never has to grow to fit both at
-  // once — toggling one closes the other rather than stacking their content.
-  property bool expanded: false
+  // Under the overview the panel shows one view at a time — Usage, Activity,
+  // Models or Cost — instead of one long scroll where nothing said which
+  // card belonged to what. `expanded` means "a detail view is showing" and
+  // gates the heavier derived data. Settings replaces the views entirely.
+  readonly property var viewTabs: [
+    { id: "usage", label: "Usage", glyph: "󰓅" },
+    { id: "activity", label: "Activity", glyph: "󰸘" },
+    { id: "models", label: "Models", glyph: "󰘚" },
+    { id: "cost", label: "Cost", glyph: "󰄔" }
+  ]
+  property string viewTab: "usage"
+  readonly property bool expanded: viewTab !== "usage" && !settingsOpen
   property bool settingsOpen: false
-  property bool expandedBeforeSettings: false
+  // `e` steps through the views (and leaves Settings).
   function toggleExpanded() {
-    root.expanded = !root.expanded
-    if (root.expanded) root.settingsOpen = false
+    root.settingsOpen = false
+    var ids = root.viewTabs.map(function(t) { return t.id })
+    root.viewTab = ids[(ids.indexOf(root.viewTab) + 1) % ids.length]
   }
   function toggleSettings() {
-    if (root.settingsOpen) {
-      root.settingsOpen = false
-      root.expanded = root.expandedBeforeSettings
-    } else {
-      root.expandedBeforeSettings = root.expanded
-      root.expanded = false
-      root.settingsOpen = true
-    }
+    root.settingsOpen = !root.settingsOpen
   }
 
   // Countdowns and "updated" read this instead of Date.now() so the
@@ -111,11 +129,16 @@ Panel {
   property double nowMs: Date.now()
 
   readonly property var limits: limitWindows(provider)
-  readonly property var models: modelRows(provider)
-  readonly property var detailModels: expanded ? detailModelRows(provider) : []
-  // Only computed while expanded: collapsed behavior/output must stay
-  // exactly what it was before this property existed.
-  readonly property var allModels: expanded ? allModelRows(providers) : []
+  // Windows the overview does not already draw as a ring (a model-scoped
+  // weekly, a credits window): the Usage view lists only these.
+  readonly property var otherLimits: limits.filter(function(w) {
+    for (var i = 0; i < root.ringWindows.length; i++) {
+      var ring = root.ringWindows[i]
+      if (ring.title === w.title && ring.resetAt === w.resetAt && ring.percent === w.percent) return false
+    }
+    return true
+  })
+  readonly property var detailModels: expanded ? modelUsageRows(provider) : []
   readonly property var headline: bindingWindow(provider)
   readonly property var balance: provider ? (provider.balance || null) : null
   // Optional, collector-reported "what this would cost at published API
@@ -131,47 +154,295 @@ Panel {
   readonly property var costDailyRows: costSummary ? costSummary.days : []
   readonly property var costProviderRows: expanded ? CostAnalytics.providerRows(providers) : []
 
-  // ---------------------------------------------------------- history chart
-  //
-  // Issue #13. Session-only, like `expanded`/`settingsOpen` above — the
-  // selector re-slices `provider.recentDays`, which is already sitting in
-  // memory from the last refresh, so flipping it never touches
-  // usage.runUpdate()/Main.qml's updateProcess. Defaults to "7d" rather
-  // than the manifest's 30-day `historyDays` default because a real
-  // collector today only ever fills ~7-31 days (see capRecentDays in
-  // logic/aggregate.js): defaulting to a range most collectors can satisfy
-  // means expanding the panel for the first time shows a chart, not an
-  // immediate "not available" message.
-  property string historyRangeId: "7d"
-  // Details use every day the collector has actually recorded (up to 30),
-  // instead of pretending 24h/30d/90d are interchangeable choices when
-  // the source only has a week. This removes a misleading selector and makes
-  // the chart's time span self-evident.
-  readonly property int detailHistoryDays: provider && provider.recentDays
-    ? Math.min(30, Math.max(1, provider.recentDays.length)) : 7
-  // Only computed while expanded, same reasoning as `allModels` above.
-  readonly property var historySeries: (expanded && provider)
-    ? History.buildHistorySeries(provider.recentDays || [], detailHistoryDays)
-    : null
-
-  function historyUnavailableText(series) {
-    if (!series) return ""
-    var n = Number(series.availableDays || 0)
-    return "History not available beyond " + n + " day" + (n === 1 ? "" : "s")
-      + " for this subscription."
-  }
-
-  function historyRangeLabel(rangeId) {
-    for (var i = 0; i < History.RANGE_OPTIONS.length; i++)
-      if (History.RANGE_OPTIONS[i].id === rangeId) return History.RANGE_OPTIONS[i].label
-    return rangeId
-  }
+  // The trend covers every day retained by the collector, including day 31.
+  readonly property var historySeries: expanded && provider && Array.isArray(provider.recentDays) && provider.recentDays.length
+    ? History.buildHistorySeries(provider.recentDays, provider.recentDays.length) : null
 
   function historySeriesTotal(series) {
     if (!series || !series.points) return 0
     var total = 0
     for (var i = 0; i < series.points.length; i++) total += Number(series.points[i].value || 0)
     return total
+  }
+
+  // ---------------------------------------------------------- settings UI
+
+  // Session-only, like `expanded`: which Settings tab is showing.
+  property string settingsTab: "providers"
+
+  function providerById(id) {
+    for (var i = 0; i < root.providers.length; i++)
+      if (root.providers[i].providerId === id) return root.providers[i]
+    return null
+  }
+
+  // One line under a provider's name in Settings: its problem if it has
+  // one, otherwise its plan and where it sits in the bar.
+  function providerSettingsSummary(row, live) {
+    if (!row) return ""
+    if (!row.enabled) return "Off · not collected"
+    if (live && String(live.usageStatusText || "") !== "") return String(live.usageStatusText)
+    var brand = row.brand || row.providerId
+    var inactive = (brand === "claude" || brand === "codex") && usage.activeAccountId(brand) !== row.providerId
+    // Short enough to sit beside the bar preview without being cut.
+    var place = inactive ? "Not the active account"
+      : (row.barRole === "fixed" ? "In the bar"
+        : (row.barRole === "cycle" ? "Rotating" : "Panel only"))
+    var plan = live && String(live.tierLabel || "") !== "" ? String(live.tierLabel) + " · " : ""
+    return plan + place
+  }
+
+  function formatSeconds(seconds) {
+    var n = Math.max(0, Math.round(Number(seconds) || 0))
+    if (n < 60) return n + "s"
+    if (n % 60 === 0) return (n / 60) + " min"
+    return Math.floor(n / 60) + "m " + (n % 60) + "s"
+  }
+
+  // ---------------------------------------------------------- insights
+  //
+  // Derived, read-only views over data the selected provider already
+  // reported (logic/insights.js): how each limit window is pacing against
+  // its own clock, and what the daily token history says. Nothing here
+  // triggers a collector run.
+  readonly property var activity: provider ? Insights.activityStats(provider.recentDays || [], todayDate()) : null
+  readonly property bool hasActivity: !!activity && activity.recordedDays > 0 && !!provider
+    && provider.hasLocalStats !== false
+  readonly property var heatmap: (expanded && provider)
+    ? Insights.heatmapGrid(provider.recentDays || [], todayDate(), 5) : null
+  readonly property var tokenMixData: (expanded && provider) ? Insights.tokenMix(provider.modelUsage || {}) : null
+  // When the selected record's percentages were read; pace is measured at
+  // that instant rather than at the panel's clock.
+  // updatedAt is optional in the collector contract: absent means "now";
+  // present but unparseable withholds pace rather than guessing its age.
+  readonly property var measuredAtMs: provider && String(provider.updatedAt || "") !== ""
+    ? Date.parse(String(provider.updatedAt)) : undefined
+
+  function paceFor(window) {
+    return window ? Insights.windowPace(window, root.nowMs, root.measuredAtMs) : null
+  }
+
+  // What the overview card talks about. A full window has already stopped
+  // you; otherwise the window that empties first at its own rate beats the
+  // merely fullest one (a fast Session can run out long before a fuller,
+  // slower Weekly); otherwise the fullest current window. A prepaid balance
+  // takes over when its own state is worse.
+  readonly property var overviewWindow: {
+    var fullest = currentBindingWindow(provider)
+    if (!fullest) return null
+    if (fullest.percent >= 1 || windowIsStale(fullest)) return fullest
+    var racing = Insights.firstRunOut(limitWindows(provider).filter(function(w) { return !root.windowIsStale(w) }),
+      root.nowMs, root.measuredAtMs)
+    return racing ? racing.window : fullest
+  }
+  readonly property var headlinePace: overviewWindow ? paceFor(overviewWindow) : null
+  readonly property string overviewSeverity: overviewWindow ? severityForPercent(overviewWindow.percent) : "ok"
+  readonly property bool overviewShowsBalance: !!balance && balance.funded > 0
+    && (!overviewWindow || windowIsStale(overviewWindow) || Thresholds.worstSeverity(overviewSeverity, balanceSeverity) !== overviewSeverity)
+
+  // One short phrase per window. A run-out that lands before the reset is
+  // the only case that earns the warning color; "ahead of pace" alone is
+  // information, not an alarm.
+  function paceText(pace) {
+    if (!pace) return ""
+    if (pace.used >= 1) return "Limit reached"
+    if (pace.runsOutInMs >= 0) return "Out in " + root.formatDuration(pace.runsOutInMs) + " at this rate"
+    if (pace.status === "idle") return "Unused this window"
+    var points = Math.round(Math.abs(pace.delta) * 100)
+    if (pace.status === "on") return "On pace"
+    if (pace.status === "over") return points + "% ahead of pace"
+    return points + "% under pace"
+  }
+
+  // Keep the ring's value and color tied to the same current allowance.
+  function chipMeter(p) {
+    var w = currentBindingWindow(p)
+    var hasWindow = w && !windowIsStale(w)
+    var credit = p ? p.balance : null
+    if (credit && credit.funded > 0) {
+      var remaining = clamp(credit.remaining / credit.funded, 0, 1)
+      var creditSeverity = severityForPercent(1 - remaining)
+      if (!hasWindow || Thresholds.worstSeverity(severityForPercent(w.percent), creditSeverity) !== severityForPercent(w.percent))
+        return { value: remaining, severity: creditSeverity }
+    }
+    return hasWindow ? { value: displayPercent(w.percent), severity: severityForPercent(w.percent) } : null
+  }
+
+  function withoutRunOut(pace) {
+    if (!pace || pace.runsOutInMs < 0 || pace.used >= 1) return pace
+    var copy = {}
+    for (var key in pace) copy[key] = pace[key]
+    copy.runsOutInMs = -1
+    return copy
+  }
+
+  function paceColor(pace) {
+    if (!pace) return root.dim
+    if (pace.used >= 1) return root.textFor(root.urgent)
+    if (pace.runsOutInMs >= 0) return root.warnText
+    return root.dim
+  }
+
+  // The headline verdict for the gauge card: one plain sentence a person can
+  // act on, picked from the fullest window's own severity and pace.
+  readonly property var verdict: {
+    if (root.overviewShowsBalance) {
+      if (root.balanceSeverity === "critical") return { title: "Credit running low", color: root.textFor(root.colorForSeverity("critical")) }
+      if (root.balanceSeverity === "warn") return { title: "Credit getting low", color: root.warnText }
+      return { title: "Credit healthy", color: root.foreground }
+    }
+    var w = root.overviewWindow
+    if (!w) return null
+    var pace = root.headlinePace
+    if (root.windowIsStale(w)) return { title: "Window has reset", color: root.foreground }
+    if (w.percent >= 1) return { title: "Limit reached", color: root.textFor(root.urgent) }
+    if (root.overviewSeverity === "critical") return { title: "Almost out", color: root.textFor(root.colorForSeverity("critical")) }
+    if (pace && pace.runsOutInMs >= 0) return { title: "Running hot", color: root.warnText }
+    if (root.overviewSeverity === "warn") return { title: "Getting close", color: root.warnText }
+    if (pace && pace.status === "over") return { title: "Ahead of pace", color: root.foreground }
+    if (pace && pace.status === "on") return { title: "On pace", color: root.foreground }
+    return { title: "Plenty of room", color: root.foreground }
+  }
+
+  readonly property string verdictDetail: {
+    if (root.overviewShowsBalance) {
+      return root.formatMoney(root.balance.remaining, root.balance.currency) + " of "
+        + root.formatMoney(root.balance.funded, root.balance.currency) + " left"
+    }
+    var w = root.overviewWindow
+    if (!w) return ""
+    var title = String(w.title || "Limit")
+    if (root.windowIsStale(w)) return title + " last read " + Format.formatPercent(w.percent, usage.showAvailablePercentage) + " · updates on the next refresh"
+    var pace = root.headlinePace
+    var resetMs = root.resetMsFor(w)
+    var resetText = resetMs > 0 ? root.formatDuration(resetMs) : ""
+    if (w.percent >= 1)
+      return title + " is full" + (resetText ? " · back in " + resetText + " (" + root.resetClock(w) + ")" : "")
+    if (pace && pace.runsOutInMs >= 0 && resetMs > 0)
+      return title + " runs out in " + root.formatDuration(pace.runsOutInMs) + ", "
+        + root.formatDuration(Math.max(0, resetMs - pace.runsOutInMs)) + " before it resets"
+    // Nothing urgent: the most useful fact is when room comes back next.
+    var next = root.nextReset
+    return next ? "Next reset: " + String(next.title || "Limit") + " in " + root.formatDuration(root.resetMsFor(next))
+      + " (" + root.resetClock(next) + ")" : ""
+  }
+
+  // The windows the overview draws as rings: Session and Weekly when the
+  // account has both (the pair coding plans are judged by), otherwise up to
+  // the two fullest current windows, soonest reset first.
+  readonly property var ringWindows: {
+    var all = limitWindows(provider)
+    var current = all.filter(function(w) { return !root.windowIsStale(w) })
+    var pool = current.length > 0 ? current : all
+    var session = null
+    var weekly = null
+    for (var i = 0; i < pool.length; i++) {
+      if (!session && pool[i].title === "Session") session = pool[i]
+      if (!weekly && pool[i].title === "Weekly") weekly = pool[i]
+    }
+    var picked = session && weekly ? [session, weekly]
+      : pool.slice().sort(function(a, b) { return b.percent - a.percent }).slice(0, 2)
+    return picked.sort(function(a, b) {
+      var ra = root.resetMsFor(a), rb = root.resetMsFor(b)
+      return (ra < 0 ? Infinity : ra) - (rb < 0 ? Infinity : rb)
+    })
+  }
+
+  // The current window that hands room back soonest.
+  readonly property var nextReset: {
+    var best = null
+    var windows = limitWindows(provider)
+    for (var i = 0; i < windows.length; i++) {
+      var ms = resetMsFor(windows[i])
+      if (ms > 0 && (!best || ms < resetMsFor(best))) best = windows[i]
+    }
+    return best
+  }
+
+  function resetClock(w) {
+    var ms = w ? Date.parse(String(w.resetAt || "")) : NaN
+    return formatResetMoment(ms)
+  }
+
+  // Reset dates use the local calendar date and a 24-hour clock.
+  function formatResetMoment(ms) {
+    var at = new Date(ms)
+    if (!isFinite(at.getTime())) return ""
+    return root.dateLabel(at, false) + " " + Qt.formatTime(at, "HH:mm")
+  }
+
+  // Where a granted free reset is redeemed; the panel only reports them.
+  function redeemHint(p) {
+    var id = p ? (p.brand || p.providerId) : ""
+    if (id === "codex") return "Redeem with /usage in Codex"
+    if (id === "claude") return "Redeem in claude.ai Settings › Usage"
+    return ""
+  }
+
+  // A ring is drawn in the theme accent while it has room; only the
+  // Warn and Critical thresholds change its color (and the opt-in
+  // traffic-light palette keeps its green), so a color always means the
+  // same thing everywhere in the panel.
+  function ringTint(w) {
+    var severity = w ? severityForPercent(w.percent) : "ok"
+    if (severity !== "ok" || usage.colorfulUsageMeters) return colorForSeverity(severity)
+    return Commons.Color.accent
+  }
+
+  // Series that must be told apart (models, token kinds) get distinct hues
+  // turned from the theme accent, kept out of the red/amber warning bands
+  // and readable on the popup surface (logic/series-colors.js).
+  readonly property var seriesPalette: {
+    var colors = SeriesColors.categorical(Commons.Color.accent, root.surface, 12, Contrast.contrastRatio)
+    var out = []
+    for (var i = 0; i < colors.length; i++) out.push(Qt.rgba(colors[i].r, colors[i].g, colors[i].b, 1))
+    return out
+  }
+  function seriesColor(index) {
+    var palette = root.seriesPalette
+    return palette.length > 0 ? palette[Math.max(0, index) % palette.length] : Commons.Color.accent
+  }
+  // One color per model across views: its rank by tokens in the Models view
+  // (detailModels), so the Cost view's bar and legend match those rows.
+  readonly property var modelColorOrder: {
+    var ids = []
+    for (var i = 0; i < root.detailModels.length; i++) ids.push(String(root.detailModels[i].id))
+    return ids
+  }
+  function modelColor(id, fallbackIndex) {
+    var at = root.modelColorOrder.indexOf(String(id || ""))
+    return root.seriesColor(at >= 0 ? at : (Number(fallbackIndex) || 0))
+  }
+
+  // Cards under the tabs fade in on a view change instead of popping.
+  property real viewFade: 1
+  NumberAnimation {
+    id: viewFadeIn
+    target: root
+    property: "viewFade"
+    from: 0.25
+    to: 1
+    duration: 220
+    easing.type: Easing.OutCubic
+  }
+  onViewTabChanged: viewFadeIn.restart()
+
+  // "Updated 4m ago" from the collector's own timestamp; blank when the
+  // record does not carry one, rather than implying it is live.
+  function updatedAgoText(p) {
+    var ms = p ? Date.parse(String(p.updatedAt || "")) : NaN
+    if (!isFinite(ms)) return ""
+    var age = root.nowMs - ms
+    if (age < -60000) return ""
+    if (age < 60000) return "Updated just now"
+    return "Updated " + root.formatDuration(age) + " ago"
+  }
+
+  // Opaque blends (not alpha) so the day number drawn on a cell can pick
+  // its own readable ink with inkOn().
+  function heatColor(level) {
+    if (level <= 0) return root.mix(root.surface, root.foreground, 0.07)
+    return root.mix(root.surface, Commons.Color.accent, [0, 0.3, 0.52, 0.76, 1][Math.max(0, Math.min(4, level))])
   }
 
   // User-configurable warn/critical cutoffs (percentage points, 0-100),
@@ -319,10 +590,38 @@ Panel {
   readonly property string severity: (headlineSeverity === "critical" || balanceSeverity === "critical")
     ? "critical" : ((headlineSeverity === "warn" || balanceSeverity === "warn") ? "warn" : "ok")
   readonly property bool alarming: severity === "critical"
-  readonly property bool balanceAlarming: balanceSeverity === "critical"
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
   function alpha(c, a) { return Qt.rgba(c.r, c.g, c.b, a) }
+  function mix(a, b, t) {
+    var k = clamp(Number(t) || 0, 0, 1)
+    return Qt.rgba(a.r * (1 - k) + b.r * k, a.g * (1 - k) + b.g * k, a.b * (1 - k) + b.b * k, 1)
+  }
+
+  function contrastRatio(a, b) {
+    return Contrast.contrastRatio(a, b)
+  }
+
+  // The same hue, pushed toward black (light surface) or white (dark
+  // surface) only as far as it takes to reach `minRatio` against `bg`.
+  function readableOn(c, bg, minRatio) {
+    var target = Number(minRatio) || 4.5
+    if (contrastRatio(c, bg) >= target) return c
+    var extreme = Contrast.isLight(bg) ? Qt.rgba(0, 0, 0, 1) : Qt.rgba(1, 1, 1, 1)
+    for (var step = 1; step <= 10; step++) {
+      var candidate = mix(c, extreme, step / 10)
+      if (contrastRatio(candidate, bg) >= target) return candidate
+    }
+    return extreme
+  }
+
+  function textFor(c) { return readableOn(c, root.surface, 4.5) }
+
+  // Foreground or surface, whichever reads better on an opaque fill.
+  function inkOn(fill) {
+    return contrastRatio(root.foreground, fill) >= contrastRatio(root.surface, fill)
+      ? root.foreground : root.surface
+  }
 
   function selectProvider(index) {
     if (providers.length === 0) return
@@ -335,7 +634,7 @@ Panel {
   // selected logo vertically instead of maintaining a second horizontal
   // scroll surface inside the panel.
   function ensureSelectedChipVisible() {
-    if (!root.opened || !providerChipRepeater || !providerSwitch || !panelFlick || !column)
+    if (!root.opened || root.settingsOpen || !providerChipRepeater || !providerSwitch || !panelFlick || !column)
       return
     var chip = providerChipRepeater.itemAt(providerIndex)
     if (!chip || chip.width <= 0 || chip.height <= 0 || panelFlick.height <= 0) return
@@ -360,8 +659,18 @@ Panel {
     open()
   }
 
+  // Set by a refresh the person asked for (button, r, Enter) and cleared
+  // when that run ends. Background runs — the one every opening starts,
+  // the refresh timer — stay silent, so the panel never looks permanently
+  // busy while a slow collector works.
+  property bool manualRefresh: false
   function refreshNow() {
+    root.manualRefresh = true
     usage.refreshAll(true)
+  }
+  Connections {
+    target: usage
+    function onUpdatingChanged() { if (!usage.updating) root.manualRefresh = false }
   }
 
   // Right-click launches the agent of the mark that was clicked. Passing no
@@ -425,7 +734,11 @@ Panel {
   // as a one-minute window.
   function limitWindow(label, percent, resetAt, title, startedAt, tokenLimit) {
     return {
+      label: String(label || ""),
       title: String(title || "") !== "" ? String(title) : windowTitle(label),
+      // Pace only trusts a window length the collector stated; a title read
+      // back out of a free-text label is not one (see logic/insights.js).
+      titleExplicit: String(title || "") !== "",
       percent: Number(percent),
       resetAt: String(resetAt || ""),
       startedAt: String(startedAt || ""),
@@ -446,7 +759,8 @@ Panel {
   }
 
   // The window that decides how much room is left — the fullest one, since
-  // that is what stops the next prompt.
+  // that is what stops the next prompt. (The bar's alarm state reads this;
+  // keep it exactly as it was.)
   function bindingWindow(p) {
     var windows = limitWindows(p)
     var best = null
@@ -454,6 +768,29 @@ Panel {
       if (!best || windows[i].percent > best.percent) best = windows[i]
     }
     return best
+  }
+
+  // Panel-only variant: a window whose reset time has already passed is a
+  // leftover reading until the collector runs again, so it only wins when
+  // nothing current is left.
+  function currentBindingWindow(p) {
+    var windows = limitWindows(p)
+    var best = null
+    var stale = null
+    for (var i = 0; i < windows.length; i++) {
+      if (windowIsStale(windows[i])) {
+        if (!stale || windows[i].percent > stale.percent) stale = windows[i]
+      } else if (!best || windows[i].percent > best.percent) {
+        best = windows[i]
+      }
+    }
+    return best || stale
+  }
+
+  function windowIsStale(w) {
+    if (!w || w.resetAt === "") return false
+    var ms = new Date(w.resetAt).getTime()
+    return isFinite(ms) && ms <= root.nowMs
   }
 
   function resetMsFor(w) {
@@ -530,54 +867,25 @@ Panel {
       + "-" + String(now.getDate()).padStart(2, "0")
   }
 
+  // Calendar days read "20 Nov", with the weekday in detailed history labels.
+  // Reset timestamps use the same date plus a 24-hour clock.
+  readonly property var weekdayNames: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+  readonly property var monthNames: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+  function dateLabel(at, withWeekday) {
+    return (withWeekday ? root.weekdayNames[at.getDay()] + " " : "") + at.getDate() + " " + root.monthNames[at.getMonth()]
+  }
+
   function dayName(date) {
     var parsed = new Date(String(date || "") + "T00:00:00")
     if (isNaN(parsed.getTime())) return String(date || "")
-    return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][parsed.getDay()]
-  }
-
-  function dayLabel(date, today) {
-    if (today) return "Today"
-    return dayName(date)
+    return root.weekdayNames[parsed.getDay()]
   }
 
   function shortHistoryDate(date) {
     var parsed = new Date(String(date || "") + "T00:00:00")
     if (isNaN(parsed.getTime())) return String(date || "")
-    return (parsed.getMonth() + 1) + "/" + parsed.getDate()
-  }
-
-  // The switch deliberately gives every provider the same hit target. A
-  // plain Text inside qs.Ui.Button does not elide by itself, so cap its
-  // visible label here instead of letting a long collector-supplied name
-  // bleed into the next chip. The full name remains the hero title when the
-  // chip is selected.
-  function providerChipLabel(provider) {
-    var name = String(provider && provider.providerName || "")
-    return name.length > 14 ? name.slice(0, 13) + "…" : name
-  }
-
-  // A full collector can retain up to 90 days. Rendering every one as a
-  // collapsed row made a normal panel hundreds of pixels taller than the
-  // screen, even before a person opened the detailed chart. Keep the useful
-  // recent week in the summary; the explicit details control exposes every
-  // available day and range without silently discarding data.
-  function summaryDays(p, limit) {
-    var list = p && Array.isArray(p.recentDays) ? p.recentDays.slice() : []
-    list.sort(function(a, b) {
-      var left = String(a && a.date || "")
-      var right = String(b && b.date || "")
-      return left < right ? -1 : (left > right ? 1 : 0)
-    })
-    var count = Math.max(1, Number(limit) || 7)
-    return list.length > count ? list.slice(list.length - count) : list
-  }
-
-  function dayPeak(days) {
-    var list = Array.isArray(days) ? days : []
-    var peak = 0
-    for (var i = 0; i < list.length; i++) peak = Math.max(peak, Number(list[i].messageCount || 0))
-    return peak
+    return root.dateLabel(parsed, false)
   }
 
   function unpricedModelText(cost) {
@@ -598,74 +906,30 @@ Panel {
     return isFinite(value) && value >= 0 ? Math.round(value * 100) + "% priced" : "Rate coverage unavailable"
   }
 
-  function costProviderRow(p) {
-    if (!p) return null
-    var id = String(p.providerId || "")
-    for (var i = 0; i < root.costProviderRows.length; i++) {
-      if (String(root.costProviderRows[i].providerId || "") === id) return root.costProviderRows[i]
-    }
-    return null
-  }
-
-  function costPlanValue(row) {
-    if (!row) return "—"
-    if (row.usageKind === "subscription" && Number(row.subscriptionPercent) >= 0)
-      return Format.formatPercent(Number(row.subscriptionPercent))
-    if (row.usageKind === "api-credit" && Number(row.balanceRemaining) >= 0) {
-      return root.formatMoney(row.balanceRemaining, row.balanceCurrency)
-    }
-    return "—"
-  }
-
-  function costPlanLabel(row) {
-    if (!row) return "On plan"
-    if (row.usageKind === "subscription") return "On subscription"
-    if (row.usageKind === "api-credit") return "API credit left"
-    return "Plan usage"
-  }
-
-  // Kept short on purpose: this renders inside a fixed-width column next to
-  // the plan/API figures, and a long sentence here just gets silently
-  // ellipsized — the "resets in" countdown is the one thing that must
-  // always fit.
-  function costPlanHint(row) {
-    if (!row) return "No provider data"
-    if (row.usageKind === "subscription") {
-      var resetAt = String(row.subscriptionResetAt || "")
-      if (resetAt !== "") {
-        var remainingMs = new Date(resetAt).getTime() - root.nowMs
-        if (remainingMs > 0) return "Resets in " + root.formatDuration(remainingMs)
-      }
-      return String(row.subscriptionTitle || "Session") + " quota"
-    }
-    if (row.usageKind === "api-credit") {
-      if (Number(row.balanceFunded) > 0 && Number(row.balanceSpent) >= 0) {
-        var spent = root.formatMoney(row.balanceSpent, row.balanceCurrency) + " of "
-          + root.formatMoney(row.balanceFunded, row.balanceCurrency) + " spent"
-        return row.balanceEstimated ? spent + " · est." : spent
-      }
-      return row.balanceEstimated ? "Estimated balance" : "API balance"
-    }
-    if (row.statusText !== "") return "Provider data unavailable"
-    return "No quota or balance reported"
-  }
-
-  function costApiValue(row) {
-    return row && row.hasCost ? root.formatUsd(row.estimateUsd) : "—"
-  }
-
-  // Combines the two small-print footer lines (price-catalogue coverage and
-  // version) into one so the model breakdown doesn't end in a stack of
-  // near-identical caption rows.
-  function costFooterText(cost, summary) {
-    var parts = []
-    if (summary && Number(summary.coverage) >= 0) {
-      parts.push(summary.totalTokens > 0
+  // The cost figure's fine print, for its tooltip.
+  function costDetailText(cost, summary) {
+    if (!cost) return ""
+    var lines = ["What this usage would cost at published API rates. Not a bill."]
+    if (summary && Number(summary.coverage) >= 0)
+      lines.push(summary.totalTokens > 0
         ? root.costCoverageText(summary.coverage) + " of " + usage.formatTokenCount(summary.totalTokens) + " tokens"
         : root.costCoverageText(summary.coverage))
-    }
-    if (cost && String(cost.pricingVersion || "") !== "") parts.push("catalogue " + String(cost.pricingVersion))
-    return parts.join(" · ")
+    if (String(cost.pricingVersion || "") !== "") lines.push("Rate catalogue " + String(cost.pricingVersion))
+    return lines.join("\n")
+  }
+
+  // A collector's period ("30d", "7d", "All time") in the panel's words.
+  function costPeriodLabel(period) {
+    var text = String(period || "").trim()
+    var days = /^(\d+)\s*d$/i.exec(text)
+    if (days) return "last " + days[1] + " days"
+    return text.toLowerCase()
+  }
+
+  // "Fri 20 Nov" for a "YYYY-MM-DD" day.
+  function dayLabelFor(date) {
+    var parsed = new Date(String(date || "") + "T00:00:00")
+    return isNaN(parsed.getTime()) ? String(date || "") : root.dateLabel(parsed, true)
   }
 
   function dayTooltip(day, today) {
@@ -673,7 +937,7 @@ Panel {
     var parsed = new Date(String(day.date) + "T00:00:00")
     var label = isNaN(parsed.getTime())
       ? String(day.date)
-      : dayName(day.date) + " " + (parsed.getMonth() + 1) + "/" + parsed.getDate()
+      : root.dateLabel(parsed, true)
     var text = label + " · " + usage.formatTokenCount(Number(day.messageCount || 0)) + " tokens"
     // Prompt and session counts only exist for today, so they ride along here
     // instead of taking a section of their own. Billing-API agents never
@@ -684,19 +948,8 @@ Panel {
     return text
   }
 
-  function weekPeak(p) {
-    var days = p ? (p.recentDays || []) : []
-    var peak = 0
-    for (var i = 0; i < days.length; i++) peak = Math.max(peak, Number(days[i].messageCount || 0))
-    return peak
-  }
-
-  // Shared by the per-provider "TOKENS BY MODEL" section and the expanded
-  // view's cross-provider one below — both start from a modelId -> token
-  // bucket map, they just build it differently (one provider's modelUsage
-  // vs. Aggregate.allProviderModelUsage's combined map across every
-  // enabled provider).
-  function modelUsageRows(usageByModel, limit) {
+  function modelUsageRows(p) {
+    var usageByModel = p ? p.modelUsage || {} : {}
     var rows = []
     for (var id in usageByModel) {
       var bucket = usageByModel[id] || {}
@@ -715,26 +968,7 @@ Panel {
       })
     }
     rows.sort(function(a, b) { return b.total - a.total })
-    return rows.slice(0, limit || 4)
-  }
-
-  function modelRows(p) {
-    // The default view is an at-a-glance dashboard. Three ranked rows keep
-    // the most useful comparison visible without pushing the current limit
-    // and cost information below the fold; the detailed view retains the
-    // complete cross-provider table.
-    return modelUsageRows(p ? (p.modelUsage || {}) : {}, 3)
-  }
-
-  function detailModelRows(p) {
-    return modelUsageRows(p ? (p.modelUsage || {}) : {}, 12)
-  }
-
-  // Every enabled provider's models in one table, not just the currently
-  // selected chip's — only computed/rendered when the panel is expanded.
-  // A generous cap (12) since it spans every subscription at once.
-  function allModelRows(providerList) {
-    return modelUsageRows(Aggregate.allProviderModelUsage(providerList), 12)
+    return rows.slice(0, 12)
   }
 
   function modelTooltip(row) {
@@ -751,21 +985,6 @@ Panel {
     if (provider && provider.syncEnabled && provider.syncDeviceCount > 0)
       return "Merged from " + provider.syncDeviceCount + " device" + (provider.syncDeviceCount === 1 ? "" : "s")
     return ""
-  }
-
-  // Agents that ship a white mark carry an `assets/<id>-light.svg` twin for
-  // light surfaces; marks that work on both (Claude's brand-orange) ship one
-  // file. The luminance check decides which candidate to try first.
-  function colorChannelLuminance(value) {
-    var channel = Number(value)
-    if (!isFinite(channel)) return 0
-    return channel <= 0.03928 ? channel / 12.92 : Math.pow((channel + 0.055) / 1.055, 2.4)
-  }
-
-  function colorLuminance(color) {
-    return 0.2126 * colorChannelLuminance(color.r)
-      + 0.7152 * colorChannelLuminance(color.g)
-      + 0.0722 * colorChannelLuminance(color.b)
   }
 
   // An asset path has to be explicitly registered. QML's Image cannot probe a
@@ -814,7 +1033,7 @@ Panel {
     var assets = root.providerIconAssets[id]
     if (!assets) return []
     var candidates = []
-    if (colorLuminance(surfaceColor || Color.background) >= 0.5 && assets.lightAsset)
+    if (Contrast.isLight(surfaceColor || Commons.Color.background) && assets.lightAsset)
       candidates.push(Qt.resolvedUrl("assets/" + assets.lightAsset))
     if (assets.defaultAsset) candidates.push(Qt.resolvedUrl("assets/" + assets.defaultAsset))
     return candidates
@@ -834,7 +1053,10 @@ Panel {
     // active. Match the monochrome mark to that live color, rather than to
     // the popup surface used by the panel copy of the same mark.
     var liveForeground = bar ? (bar.barForeground || bar.foreground) : foreground
-    if (colorLuminance(liveForeground) < 0.5 && assets.lightAsset)
+    // Dark ink (the -light twin) only when the bar's own text is dark. The
+    // old 0.5 luminance cutoff filed mid-tone light text such as Tokyo
+    // Night's #a9b1d6 as dark and drew a near-black mark on a dark bar.
+    if (!Contrast.isLight(liveForeground) && assets.lightAsset)
       candidates.push(Qt.resolvedUrl("assets/" + assets.lightAsset))
     if (assets.defaultAsset) candidates.push(Qt.resolvedUrl("assets/" + assets.defaultAsset))
     return candidates
@@ -893,7 +1115,7 @@ Panel {
   }
   onOpenedChanged: if (opened) {
     cursorActive = false
-    expanded = usage.openInDetailedView
+    viewTab = usage.openInDetailedView ? "activity" : "usage"
     settingsOpen = false
     nowMs = Date.now()
     if (panelFlick) panelFlick.contentY = 0
@@ -905,6 +1127,75 @@ Panel {
     id: usage
     settings: root.settings
     moduleId: root.moduleName
+  }
+
+  // Draft copies of the numeric settings, committed only from the save bar.
+  // Binding a field's `value` straight to a setting meant every settings
+  // write (even to an unrelated field, or the periodic refresh reloading
+  // `settings` wholesale) could reassert a stale number over whatever the
+  // person was still typing. Drafts only change from resyncDrafts() (on
+  // opening settings, or Discard) or the fields' own onModified.
+  QtObject {
+    id: settingsDraft
+
+    property int cycleSlots: usage.barCycleSlots
+    property int cycleIntervalSec: usage.barCycleIntervalSec
+    property int refreshIntervalSec: usage.refreshIntervalSec
+    property int warnThresholdPct: root.displayWarnThresholdPct
+    property int criticalThresholdPct: root.displayCriticalThresholdPct
+    property bool showsAvailable: usage.showAvailablePercentage
+
+    readonly property bool rotationDirty: cycleSlots !== usage.barCycleSlots
+      || cycleIntervalSec !== usage.barCycleIntervalSec
+    readonly property bool refreshDirty: refreshIntervalSec !== usage.refreshIntervalSec
+    readonly property bool thresholdsDirty: warnThresholdPct !== root.displayWarnThresholdPct
+      || criticalThresholdPct !== root.displayCriticalThresholdPct
+    readonly property bool dirty: rotationDirty || refreshDirty || thresholdsDirty
+
+    // In used terms Warn must be below Critical; complementing both values
+    // reverses that ordering in available terms. Catch either invalid form
+    // before Save, where the person editing the number can see why.
+    readonly property bool thresholdsValid: showsAvailable
+      ? warnThresholdPct > criticalThresholdPct
+      : warnThresholdPct < criticalThresholdPct
+
+    function resyncDrafts() {
+      cycleSlots = usage.barCycleSlots
+      cycleIntervalSec = usage.barCycleIntervalSec
+      refreshIntervalSec = usage.refreshIntervalSec
+      warnThresholdPct = root.displayWarnThresholdPct
+      criticalThresholdPct = root.displayCriticalThresholdPct
+      showsAvailable = usage.showAvailablePercentage
+    }
+
+    // Preserve every in-progress draft when the presentation mode changes.
+    // Only complement the two threshold fields in place; resyncDrafts()
+    // would discard unrelated edits.
+    function syncPercentageMode() {
+      if (showsAvailable === usage.showAvailablePercentage) return
+      warnThresholdPct = 100 - warnThresholdPct
+      criticalThresholdPct = 100 - criticalThresholdPct
+      showsAvailable = usage.showAvailablePercentage
+    }
+
+    // Writes only the groups that changed, so saving a new refresh interval
+    // does not rewrite five unrelated keys through `omarchy bar set`.
+    function saveDrafts() {
+      if (rotationDirty) {
+        usage.setBarCycleSlots(cycleSlots)
+        usage.setBarCycleIntervalSec(cycleIntervalSec)
+      }
+      if (refreshDirty) usage.setRefreshIntervalSec(refreshIntervalSec)
+      if (thresholdsDirty && thresholdsValid) {
+        usage.setWarnThresholdPct(showsAvailable ? 100 - warnThresholdPct : warnThresholdPct)
+        usage.setCriticalThresholdPct(showsAvailable ? 100 - criticalThresholdPct : criticalThresholdPct)
+      }
+    }
+  }
+
+  Connections {
+    target: usage
+    function onShowAvailablePercentageChanged() { settingsDraft.syncPercentageMode() }
   }
 
   // Cheap enough to keep running: it only re-evaluates text bindings, and a
@@ -996,7 +1287,8 @@ Panel {
     for (var i = 0; i < windows.length; i++) {
       var w = windows[i]
       if (w.percent < 0) continue
-      var line = String(w.title || w.label || "Limit") + " " + Format.formatPercent(w.percent)
+      var line = String(w.title || w.label || "Limit") + " " + Format.formatPercent(w.percent, usage.showAvailablePercentage)
+        + (usage.showAvailablePercentage ? " available" : " used")
       if (w.resetAt) {
         var remainingMs = Date.parse(w.resetAt) - Date.now()
         if (isFinite(remainingMs) && remainingMs > 0)
@@ -1153,72 +1445,6 @@ Panel {
     notifyProcess.running = true
   }
 
-  // Compact metric tiles give the three key numbers a deliberate visual
-  // hierarchy instead of making them read like a wrapped sentence.
-  component CostMetric: Item {
-    id: costMetric
-    property string label: ""
-    property string valueText: ""
-    property string hint: ""
-
-    implicitHeight: metricContent.implicitHeight + Style.space(16)
-
-    Rectangle {
-      anchors.fill: parent
-      radius: Style.cornerRadius
-      color: root.alpha(root.foreground, 0.055)
-      border.width: 1
-      border.color: root.alpha(root.foreground, 0.10)
-    }
-
-    Column {
-      id: metricContent
-      anchors.fill: parent
-      anchors.margins: Style.space(8)
-      spacing: Style.space(2)
-
-      Text {
-        width: parent.width
-        text: costMetric.valueText
-        textFormat: Text.PlainText
-        color: root.foreground
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.subtitle
-        font.bold: true
-        horizontalAlignment: Text.AlignHCenter
-        elide: Text.ElideRight
-      }
-
-      Text {
-        width: parent.width
-        text: costMetric.label
-        textFormat: Text.PlainText
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        horizontalAlignment: Text.AlignHCenter
-        elide: Text.ElideRight
-      }
-
-      Text {
-        // Always present, even when blank, so all three metric tiles in a
-        // row reserve the same height — Column drops invisible items from
-        // the layout, which used to make an empty-hint tile shorter than
-        // its neighbours.
-        width: parent.width
-        text: costMetric.hint
-        textFormat: Text.PlainText
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        horizontalAlignment: Text.AlignHCenter
-        elide: Text.ElideRight
-      }
-    }
-  }
-
-  // A wide track with faint ticks at the quarter marks, so the fill reads
-  // as "about two thirds of the way there" rather than an unscaled smear.
   component CheckpointMeter: Item {
     id: checkpointMeter
     property real value: -1
@@ -1271,7 +1497,7 @@ Panel {
       width: 3
       radius: 1
       height: checkpointTrack.height + 6
-      color: Color.accent
+      color: Commons.Color.accent
       border.width: 1
       border.color: root.surface
     }
@@ -1492,7 +1718,7 @@ Panel {
         id: overflowText
         anchors.verticalCenter: parent.verticalCenter
         text: "+" + root.hiddenBarProviderCount
-        color: root.dim
+        color: root.barDim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
         font.bold: true
@@ -1545,7 +1771,9 @@ Panel {
     // A dashboard needs room for labels and numbers to breathe. The previous
     // narrow panel regularly truncated the cost source and model names,
     // making otherwise correct information look unfinished.
-    contentWidth: panel.fittedContentWidth(root.settingsOpen ? Style.space(840) : Style.space(430))
+    // One width for every view: Settings used to jump to twice the width,
+    // which moved the card under the pointer.
+    contentWidth: panel.fittedContentWidth(Style.space(440))
     // Keep the everyday Claude/Codex view on screen. Details can be longer,
     // but making the default popup short turned even ordinary mouse-wheel
     // scrolling into needless work.
@@ -1560,6 +1788,7 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      blocked: root.settingsOpen && (accountPathsInput.activeFocus || accountNameInput.activeFocus || syncDirInput.activeFocus)
 
       onMoveRequested: function(dx, dy) {
         if (dx !== 0) {
@@ -1574,7 +1803,8 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        if (t === "e" || t === "E") root.toggleExpanded()
+        if (!root.settingsOpen && (t === "r" || t === "R")) root.refreshNow()
+        else if (t === "e" || t === "E") root.toggleExpanded()
         else if (t === "s" || t === "S") root.toggleSettings()
       }
 
@@ -1615,60 +1845,40 @@ Panel {
         Column {
           id: column
           width: panelFlick.width
-          spacing: Style.space(18)
+          spacing: Style.space(14)
 
-          // ---------- Hero: provider mark · name · plan ----------
-          PanelHero {
+          // ---------- Hero: provider mark · name · plan · actions ----------
+          // Always present: it holds the Settings gear, which must stay
+          // reachable even when every provider has been turned off.
+          Item {
             id: hero
-            visible: !!root.provider
             width: parent.width
-            title: root.provider ? root.provider.providerName : ""
-            meta: root.heroMeta(root.provider)
-            foreground: root.foreground
-            fontFamily: root.fontFamily
+            implicitHeight: Math.max(heroTile.height, heroText.implicitHeight, heroActions.implicitHeight)
 
-            // Two distinct, separately-labeled controls rather than one
-            // overloaded toggle: the gear opens the settings form (issue
-            // 08), the chevron reveals the cross-provider data section
-            // (issue 07). They're mutually exclusive (see toggleExpanded/
-            // toggleSettings) so opening one never leaves the other's
-            // content stacked underneath, taking up scroll height nobody
-            // asked to see.
-            trailingControl: Component {
-              Row {
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.space(6)
+            Rectangle {
+              id: heroTile
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(46)
+              height: width
+              radius: root.cardRadius
+              color: root.alpha(Commons.Color.accent, 0.10)
+              border.width: 1
+              border.color: root.alpha(Commons.Color.accent, 0.28)
 
-                PanelActionButton {
-                  iconText: root.settingsOpen ? "󰁍" : "󰒓"
-                  tooltipText: root.settingsOpen ? "Back to usage (s)" : "Settings (s)"
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  size: Style.space(28)
-                  fontSize: Style.font.body
-                  bordered: true
-                  focusable: true
-                  onClicked: root.toggleSettings()
-                }
-
-                PanelActionButton {
-                  visible: !root.settingsOpen
-                  iconText: root.expanded ? "󰅃" : "󰅀"
-                  tooltipText: root.expanded ? "Hide details (e)" : "Show detailed history and all-provider models (e)"
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  size: Style.space(28)
-                  fontSize: Style.font.body
-                  bordered: true
-                  focusable: true
-                  onClicked: root.toggleExpanded()
-                }
+              Text {
+                anchors.centerIn: parent
+                visible: root.settingsOpen
+                text: "󰢻"
+                color: root.accentText
+                font.family: root.fontFamily
+                font.pixelSize: Math.round(Style.font.display * 0.95)
               }
-            }
 
-            iconComponent: Component {
               Item {
                 id: heroMark
+                visible: !root.settingsOpen
+                anchors.centerIn: parent
                 property var candidates: root.iconCandidatesForProvider(root.provider, root.surface)
                 // Provider objects are rebuilt on every refresh, which churns the
                 // array's identity without changing its content. Restart the fallback
@@ -1680,8 +1890,8 @@ Panel {
                 property real iconScale: root.iconScaleForProvider(root.provider)
                 onCandidatesKeyChanged: candidateIndex = 0
 
-                width: Style.font.display
-                height: Style.font.display
+                width: Style.space(28)
+                height: width
 
                 Image {
                   id: heroMarkImage
@@ -1712,66 +1922,130 @@ Panel {
                 }
               }
             }
-          }
 
-          Column {
-            id: accountComparison
-            visible: (root.accountBrand === "claude" || root.accountBrand === "codex")
-              && root.accountRows.length > 1 && !root.settingsOpen
-            width: parent.width
-            spacing: Style.space(6)
+            Column {
+              id: heroText
+              anchors.left: heroTile.right
+              anchors.leftMargin: Style.space(12)
+              anchors.right: heroActions.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(5)
 
-            PanelSectionHeader {
-              width: parent.width
-              text: root.accountBrand === "claude" ? "Claude accounts" : "Codex accounts"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: root.accountRows
+              Text {
+                width: parent.width
+                text: root.settingsOpen ? "Settings" : (root.provider ? root.provider.providerName : "Agent Usage Plus")
+                textFormat: Text.PlainText
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Math.round(Style.font.subtitle * 1.25)
+                font.bold: true
+                elide: Text.ElideRight
+              }
 
               Row {
-                id: accountRow
-                required property var modelData
-                width: accountComparison.width
                 spacing: Style.space(8)
+                width: parent.width
 
-                Button {
-                  width: parent.width - useAccountButton.width - parent.spacing
-                  text: accountRow.modelData.providerName + "  ·  " + root.providerPercentText(accountRow.modelData)
-                  tooltipText: "Show limits for " + accountRow.modelData.providerName
-                  selected: root.selectedProviderId === accountRow.modelData.providerId
-                  bordered: true
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  fontSize: Style.font.bodySmall
-                  onClicked: root.selectedProviderId = accountRow.modelData.providerId
+                Rectangle {
+                  id: planPill
+                  visible: !root.settingsOpen && !!root.provider
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Math.min(planPillText.implicitWidth + Style.space(12), parent.width * 0.62)
+                  height: planPillText.implicitHeight + Style.space(4)
+                  radius: height / 2
+                  color: root.alpha(Commons.Color.accent, 0.14)
+
+                  Text {
+                    id: planPillText
+                    anchors.centerIn: parent
+                    width: Math.min(implicitWidth, planPill.width - Style.space(12))
+                    elide: Text.ElideRight
+                    text: root.heroMeta(root.provider)
+                    textFormat: Text.PlainText
+                    color: root.accentText
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    font.capitalization: Font.AllUppercase
+                    font.letterSpacing: 0.6
+                  }
                 }
 
-                Button {
-                  id: useAccountButton
-                  width: Style.space(68)
-                  text: usage.activeAccountId(root.accountBrand) === accountRow.modelData.providerId ? "Active" : "Use"
-                  tooltipText: "Choose this account for the bar"
-                  selected: usage.activeAccountId(root.accountBrand) === accountRow.modelData.providerId
-                  bordered: true
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  fontSize: Style.font.caption
-                  onClicked: usage.selectAccount(root.accountBrand, accountRow.modelData.providerId)
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Math.max(0, parent.width - (planPill.visible ? planPill.width + parent.spacing : 0))
+                  text: root.settingsOpen ? "Agent Usage Plus · saved to your bar config"
+                    : (root.provider ? root.updatedAgoText(root.provider) : "AI coding usage")
+                  textFormat: Text.PlainText
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideRight
                 }
+              }
+            }
+
+            // Three separate, labeled controls rather than one overloaded
+            // toggle: refresh runs the collectors now, the gear opens the
+            // settings form, the chevron reveals Details. Settings and
+            // Details are mutually exclusive (see toggleExpanded/
+            // toggleSettings) so one never stacks under the other.
+            Row {
+              id: heroActions
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(6)
+
+              Button {
+
+                radius: root.controlRadius
+                id: refreshAction
+                visible: !root.settingsOpen
+                width: Style.space(28)
+                height: Style.space(28)
+                horizontalPadding: 0
+                verticalPadding: 0
+                iconText: "󰑐"
+                iconSize: Style.font.body
+                // Spins only while a refresh you asked for runs (Button
+                // honors Omarchy's reduced-motion setting on its own).
+                iconSpinning: root.manualRefresh && usage.updating
+                tooltipText: root.manualRefresh && usage.updating ? "Refreshing…" : "Refresh now (r)"
+                bordered: true
+                focusable: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.refreshNow()
+              }
+
+              PanelActionButton {
+
+                radius: root.controlRadius
+                iconText: root.settingsOpen ? "󰁍" : "󰒓"
+                tooltipText: root.settingsOpen ? "Back to usage (s)" : "Settings (s)"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                size: Style.space(28)
+                fontSize: Style.font.body
+                bordered: true
+                focusable: true
+                onClicked: root.toggleSettings()
               }
             }
           }
 
           Text {
-            visible: root.providers.length === 0
+            visible: root.providers.length === 0 && !root.settingsOpen
             width: parent.width
             topPadding: Style.space(24)
-            text: usage.initialDiscoveryComplete
-              ? "No AI coding subscriptions found.\nAgents show up here once you've used them."
-              : "Scanning AI coding subscriptions…"
+            text: !usage.initialDiscoveryComplete
+              ? "Scanning AI coding subscriptions…"
+              : (root.settingsProviders.length > 0
+                ? (root.settingsProviders.some(function(row) { return row.enabled })
+                  ? "Waiting for usage data. Refresh to check again."
+                  : "Every provider is turned off.\nOpen Settings (gear, or s) to turn one back on.")
+                : "No AI coding subscriptions found.\nAgents show up here once you've used them.")
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
@@ -1787,12 +2061,12 @@ Panel {
           // reliable while a Repeater model is being rebuilt during refresh.
           Grid {
             id: providerSwitch
-            visible: root.providers.length > 1
+            visible: !root.settingsOpen && root.providers.length > 1
             width: parent.width
             spacing: Style.space(6)
             readonly property real chipSize: Math.max(
-              Style.space(32),
-              Math.min(Style.space(42),
+              Style.space(36),
+              Math.min(Style.space(44),
                 (width - spacing * Math.max(0, root.providers.length - 1))
                   / Math.max(1, root.providers.length)))
             readonly property int columnCount: Math.max(1, Math.min(root.providers.length,
@@ -1832,16 +2106,23 @@ Panel {
 
             Repeater {
               id: providerChipRepeater
-              model: root.providers
+              // Indexed, so a refresh updates rows in place instead of
+              // rebuilding them (rebuilt rows re-animated and re-laid out).
+              model: (root.providers).length
 
               Button {
+
+                radius: root.controlRadius
                 id: providerChip
-                required property var modelData
+                readonly property var modelData: (root.providers)[index] || ({})
                 required property int index
 
                 width: providerSwitch.chipSize
                 height: providerSwitch.chipSize
-                tooltipText: String(modelData && (modelData.providerName || modelData.providerId) || "Provider") + " — drag to reorder"
+                // The reorder hint lives here, not as a line under the marks
+                // that appeared on hover and resized the whole panel.
+                tooltipText: String(modelData && (modelData.providerName || modelData.providerId) || "Provider")
+                  + "\n" + root.providers.length + " providers · drag marks to reorder"
                 selected: index === root.providerIndex
                 hasCursor: root.cursorActive && index === root.providerIndex
                 bordered: false
@@ -1864,9 +2145,9 @@ Panel {
                     && providerSwitch.dragToIndex === index
                     && providerSwitch.dragToIndex !== providerSwitch.dragFromIndex
                   color: "transparent"
-                  radius: Style.cornerRadius
+                  radius: root.controlRadius
                   border.width: 2
-                  border.color: Color.accent
+                  border.color: Commons.Color.accent
                 }
 
                 // A plain click still selects the provider (see the Button's
@@ -1898,17 +2179,44 @@ Panel {
                   }
                   onTranslationChanged: {
                     if (!active) return
-                    providerSwitch.updateDragTarget(translation.x, translation.y)
-                    dragGhost.follow(translation.x, translation.y)
+                    providerSwitch.updateDragTarget(activeTranslation.x, activeTranslation.y)
+                    dragGhost.follow(activeTranslation.x, activeTranslation.y)
                   }
+                }
+
+                // Each chip carries its account's fullest meter as a ring, so
+                // the switcher is also a glance at every subscription.
+                ChipRing {
+                  anchors.centerIn: parent
+                  width: parent.width - Style.space(4)
+                  height: width
+                  readonly property var meter: root.chipMeter(providerChip.modelData)
+                  visible: !!meter
+                  value: meter ? meter.value : 0
+                  color: root.colorForSeverity(meter ? meter.severity : "ok")
                 }
 
                 ProviderMark {
                   anchors.centerIn: parent
-                  width: Math.min(parent.width - Style.space(10), Style.space(24))
+                  width: Math.min(parent.width - Style.space(16), Style.space(22))
                   height: width
                   provider: providerChip.modelData
                   opacity: providerChip.selected || providerChip.hasCursor ? 1.0 : 0.82
+                }
+
+                // A problem state (sign-in missing, endpoint down) gets a
+                // small amber/red dot, so it is visible without selecting.
+                Rectangle {
+                  visible: String(providerChip.modelData && providerChip.modelData.usageStatusText || "") !== ""
+                  anchors.right: parent.right
+                  anchors.top: parent.top
+                  anchors.margins: Style.space(2)
+                  width: Style.space(8)
+                  height: width
+                  radius: width / 2
+                  color: root.statusColor(providerChip.modelData)
+                  border.width: 1
+                  border.color: root.surface
                 }
 
                 onClicked: {
@@ -1920,25 +2228,15 @@ Panel {
             }
           }
 
-          Text {
-            visible: providerSwitch.visible
-            width: parent.width
-            text: root.providers.length + " providers · drag marks to reorder"
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            horizontalAlignment: Text.AlignHCenter
-          }
 
           // Floating copy of whichever mark is being dragged, parented at the
           // panel's top level (not inside providerSwitch's Grid) so it can
           // render above every sibling section regardless of where the
-          // switcher sits, positioned by mapping the stationary source
-          // chip's coordinates into root's space rather than by being moved
-          // as a grid child itself.
+          // switcher sits. Keep the ghost in the popup window; the widget
+          // root belongs to the separate, bar-height window.
           Item {
             id: dragGhost
-            parent: root
+            parent: keyCatcher
             z: 1000
             visible: false
             width: 0
@@ -1957,7 +2255,7 @@ Panel {
             function follow(offsetX, offsetY) {
               var source = providerChipRepeater.itemAt(providerSwitch.dragFromIndex)
               if (!source) return
-              var origin = source.mapToItem(root, 0, 0)
+              var origin = source.mapToItem(keyCatcher, 0, 0)
               x = origin.x + offsetX
               y = origin.y + offsetY
             }
@@ -1978,7 +2276,7 @@ Panel {
               implicitHeight: statusContent.implicitHeight + Style.spacing.xl * 2
               color: root.alpha(root.statusColor(root.provider), 0.10)
               borderSpec: Border.flat(root.alpha(root.statusColor(root.provider), 0.35), 1)
-              radius: Style.cornerRadius
+              radius: root.cardRadius
 
               Column {
                 id: statusContent
@@ -1993,7 +2291,7 @@ Panel {
                   width: parent.width
                   text: root.provider ? String(root.provider.usageStatusText || "") : ""
                   textFormat: Text.PlainText
-                  color: root.statusColor(root.provider)
+                  color: root.textFor(root.statusColor(root.provider))
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
                   font.bold: true
@@ -2013,20 +2311,227 @@ Panel {
               }
             }
 
-          // ---------- Balance / limits ----------
-          PanelSeparator {
-            visible: balanceSection.visible || limitsSection.visible || detailModelSection.visible || costSection.visible
-            foreground: root.foreground
+          // ---------- Overview: rings, resets, forecast ----------
+          // What the bar cannot show: how full each window is, when it
+          // resets (as large as the percentage it gives back), and whether
+          // it will run out before that reset at the current rate.
+          BorderSurface {
+            id: overviewCard
+            visible: !root.settingsOpen && !!root.provider && !!root.verdict
+            width: parent.width
+            implicitHeight: overviewContent.implicitHeight + Style.space(28)
+            color: root.alpha(root.foreground, 0.035)
+            borderSpec: Border.flat(root.alpha(Commons.Color.accent, 0.22), 1)
+            radius: root.cardRadius
+
+            readonly property bool creditOnly: root.ringWindows.length === 0 && !!root.balance && root.balance.funded > 0
+            readonly property int ringCount: creditOnly ? 1 : Math.min(2, root.ringWindows.length)
+
+            Rectangle {
+              anchors.fill: parent
+              anchors.margins: 1
+              radius: parent.radius
+              gradient: Gradient {
+                orientation: Gradient.Vertical
+                GradientStop { position: 0; color: root.alpha(Commons.Color.accent, 0.09) }
+                GradientStop { position: 0.75; color: root.alpha(Commons.Color.accent, 0.0) }
+              }
+            }
+
+            Column {
+              id: overviewContent
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(14)
+              anchors.rightMargin: Style.space(14)
+              spacing: Style.space(14)
+
+              // Fixed instances rather than a Repeater: a refresh rebinds
+              // them in place, so the rings never re-fill from zero.
+              Row {
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Style.space(10)
+                readonly property real tileWidth: overviewCard.ringCount === 2
+                  ? (overviewContent.width - spacing) / 2 : Math.min(overviewContent.width, Style.space(220))
+
+                RingTile {
+                  width: parent.tileWidth
+                  visible: overviewCard.ringCount >= 1
+                  creditMode: overviewCard.creditOnly
+                  window: !overviewCard.creditOnly && root.ringWindows.length > 0 ? root.ringWindows[0] : null
+                  tint: root.ringTint(window)
+                }
+
+                RingTile {
+                  width: parent.tileWidth
+                  visible: overviewCard.ringCount === 2
+                  window: root.ringWindows.length > 1 ? root.ringWindows[1] : null
+                  tint: root.ringTint(window)
+                }
+              }
+
+              Text {
+                visible: overviewCard.creditOnly
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                text: root.balance ? root.formatMoney(root.balance.remaining, root.balance.currency) + " of "
+                  + root.formatMoney(root.balance.funded, root.balance.currency) + " left" : ""
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+          }
+
+          // ---------- View tabs ----------
+          // One view at a time under the overview, so every card below has
+          // an obvious home: Usage (limits, today, accounts), Activity
+          // (calendar and trend), Models (token mix and per-model use) and
+          // Cost (API-rate equivalent).
+          TabStrip {
+            id: viewTabStrip
+            visible: !root.settingsOpen && !!root.provider
+            width: parent.width
+            tabs: root.viewTabs
+            current: root.viewTab
+            onPicked: function(id) {
+              root.viewTab = id
+              if (panelFlick) panelFlick.contentY = 0
+            }
+          }
+
+          // ---------- Today at a glance ----------
+          Row {
+            id: todayTiles
+            opacity: root.viewFade
+            visible: root.viewTab === "usage" && !root.settingsOpen && !!root.provider && root.provider.hasLocalStats !== false
+              && (root.hasActivity || todayTokens > 0 || root.provider.todayPrompts > 0 || root.provider.todaySessions > 0)
+            width: parent.width
+            spacing: Style.space(8)
+            readonly property real tileWidth: (width - spacing * 2) / 3
+            readonly property real todayTokens: root.provider && Number(root.provider.todayTotalTokens) > 0
+              ? Number(root.provider.todayTotalTokens) : (root.activity ? root.activity.today : 0)
+            readonly property bool promptStats: !!root.provider && root.provider.hasPromptStats !== false
+
+            StatTile {
+              width: todayTiles.tileWidth
+              glyph: "󱐋"
+              label: "Today"
+              valueText: usage.formatTokenCount(todayTiles.todayTokens)
+              // Compared from the same number the tile shows, and only when
+              // the history actually has a day for today.
+              readonly property var change: root.activity && root.activity.hasToday && root.activity.avg7 > 0
+                ? todayTiles.todayTokens / root.activity.avg7 - 1 : null
+              hint: change !== null ? Insights.formatChange(change) + " vs 7d avg" : "tokens"
+              hintColor: change !== null && change > 0.5 ? root.accentText : root.dim
+              tooltipText: root.activity && root.activity.avg7 >= 0
+                ? "Tokens today · 7-day average " + usage.formatTokenCount(Math.round(root.activity.avg7)) + "/day"
+                : "Tokens today"
+            }
+
+            StatTile {
+              width: todayTiles.tileWidth
+              glyph: todayTiles.promptStats ? "󰍪" : "󰄧"
+              label: todayTiles.promptStats ? "Prompts" : "7-day avg"
+              valueText: todayTiles.promptStats
+                ? String(Number(root.provider ? root.provider.todayPrompts : 0) || 0)
+                : (root.activity && root.activity.avg7 >= 0 ? usage.formatTokenCount(Math.round(root.activity.avg7)) : "—")
+              hint: todayTiles.promptStats
+                ? (Number(root.provider ? root.provider.todaySessions : 0) || 0) + " sessions today"
+                : "tokens per day"
+            }
+
+            StatTile {
+              width: todayTiles.tileWidth
+              glyph: "󰈸"
+              label: "Streak"
+              valueText: root.hasActivity
+                ? root.activity.streak + (root.activity.streak === 1 ? " day" : " days") : "—"
+              hint: root.activity && root.activity.best
+                ? "Best day " + usage.formatTokenCount(root.activity.best.value) : ""
+              tooltipText: "Consecutive days with recorded usage" + (root.activity && root.activity.best
+                ? " · best day " + root.dateLabel(new Date(String(root.activity.best.date) + "T00:00:00"), true)
+                  + ", " + usage.formatTokenCount(root.activity.best.value) + " tokens" : "")
+            }
+          }
+
+          // Free full resets the provider granted and you can still redeem:
+          // how many and how long they last. Where to redeem is on hover.
+          BorderSurface {
+            id: freeResetsCard
+            readonly property var expiries: Aggregate.activeResetExpiries(root.provider ? root.provider.resetCredits : null, root.nowMs)
+            opacity: root.viewFade
+            visible: root.viewTab === "usage" && !root.settingsOpen && expiries.length > 0
+            width: parent.width
+            implicitHeight: Math.max(freeResetsCount.implicitHeight, freeResetDates.implicitHeight) + Style.space(24)
+            color: root.alpha(root.foreground, 0.035)
+            borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+            radius: root.cardRadius
+
+            Text {
+              id: freeResetsCount
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(14)
+              anchors.right: freeResetDates.left
+              anchors.rightMargin: Style.space(10)
+              anchors.top: freeResetDates.top
+              elide: Text.ElideRight
+              text: freeResetsCard.expiries.length + " free reset" + (freeResetsCard.expiries.length === 1 ? "" : "s")
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: true
+            }
+
+            Column {
+              id: freeResetDates
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(14)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(4)
+
+              Repeater {
+                model: freeResetsCard.expiries.length
+                Text {
+                  required property int index
+                  readonly property var expiry: freeResetsCard.expiries[index]
+                  readonly property real remaining: expiry == null ? 0 : expiry - root.nowMs
+                  anchors.right: parent.right
+                  text: {
+                    if (expiry == null) return "Expiry not reported"
+                    return root.formatDuration(remaining) + " left · " + root.formatResetMoment(expiry)
+                  }
+                  color: remaining > 0 && remaining < 2 * 86400000 ? root.warnText : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+            }
+
+            MouseArea {
+              id: freeResetsHover
+              anchors.fill: parent
+              hoverEnabled: true
+              acceptedButtons: Qt.NoButton
+            }
+
+            PanelToolTip {
+              visible: freeResetsHover.containsMouse && text !== ""
+              text: root.redeemHint(root.provider)
+              fontFamily: root.fontFamily
+            }
           }
 
           BorderSurface {
             id: balanceSection
-            visible: !root.settingsOpen && !!root.balance
+            opacity: root.viewFade
+            visible: root.viewTab === "usage" && !root.settingsOpen && !!root.balance
             width: parent.width
             implicitHeight: balanceContent.implicitHeight + Style.space(28)
             color: root.alpha(root.foreground, 0.035)
             borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-            radius: Style.cornerRadius
+            radius: root.cardRadius
 
             // The meter shows what is left, not what is used: a prepaid
             // account drains toward empty rather than filling toward a cap.
@@ -2043,11 +2548,10 @@ Panel {
               anchors.rightMargin: Style.space(14)
               spacing: Style.space(10)
 
-              PanelSectionHeader {
+              CardTitle {
                 width: parent.width
+                glyph: "󰯝"
                 text: "Prepaid balance"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
               }
 
               Item {
@@ -2098,12 +2602,13 @@ Panel {
 
           BorderSurface {
             id: limitsSection
-            visible: !root.settingsOpen && root.limits.length > 0
+            opacity: root.viewFade
+            visible: root.viewTab === "usage" && !root.settingsOpen && root.otherLimits.length > 0
             width: parent.width
             implicitHeight: limitsContent.implicitHeight + Style.space(28)
             color: root.alpha(root.foreground, 0.035)
             borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-            radius: Style.cornerRadius
+            radius: root.cardRadius
 
             Column {
               id: limitsContent
@@ -2114,18 +2619,21 @@ Panel {
               anchors.rightMargin: Style.space(14)
               spacing: Style.space(10)
 
-              PanelSectionHeader {
+              CardTitle {
                 width: parent.width
-                text: "Allowance"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
+                glyph: "󰓅"
+                text: root.ringWindows.length > 0 ? "Other limits" : "Allowance"
+                note: root.otherLimits.length > 1 ? root.otherLimits.length + " windows" : ""
               }
 
               Repeater {
-                model: root.limits
+                // Indexed, so a refresh updates rows in place instead of
+                // rebuilding them (rebuilt rows re-animated and re-laid out).
+                model: (root.otherLimits).length
 
                 LimitRow {
-                  required property var modelData
+                  readonly property var modelData: (root.otherLimits)[index] || ({})
+                  required property int index
                   width: limitsContent.width
                   window: modelData
                 }
@@ -2133,21 +2641,235 @@ Panel {
             }
           }
 
-          // ---------- Token usage by model ----------
-          // Details starts with the useful accounting view. Price information
-          // lives in the analytics card below, so this table stays about the
-          // provider's actual recorded token use and never repeats a cost.
+          // ---------- Accounts of this provider ----------
+          // Every login of the selected provider side by side: its fullest
+          // meter as a ring, its reading and next reset, and which one the
+          // bar uses. Selecting a row shows that account above.
           BorderSurface {
-            id: detailModelSection
-            visible: root.expanded && root.detailModels.length > 0
+            id: accountsCard
+            opacity: root.viewFade
+            visible: root.viewTab === "usage" && (root.accountBrand === "claude" || root.accountBrand === "codex")
+              && root.accountRows.length > 1 && !root.settingsOpen
             width: parent.width
-            implicitHeight: detailModelContent.implicitHeight + Style.space(28)
+            implicitHeight: accountComparison.implicitHeight + Style.space(28)
             color: root.alpha(root.foreground, 0.035)
             borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-            radius: Style.cornerRadius
+            radius: root.cardRadius
 
             Column {
-              id: detailModelContent
+              id: accountComparison
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(14)
+              anchors.rightMargin: Style.space(14)
+              spacing: Style.space(6)
+
+              CardTitle {
+                width: parent.width
+                glyph: "󰀏"
+                text: root.accountBrand === "claude" ? "Claude accounts" : "Codex accounts"
+                note: root.accountRows.length + " logins"
+              }
+
+              Repeater {
+                // Indexed, so a refresh updates rows in place instead of
+                // rebuilding them (rebuilt rows re-animated and re-laid out).
+                model: (root.accountRows).length
+
+                Rectangle {
+                  id: accountRow
+                  readonly property var modelData: (root.accountRows)[index] || ({})
+                  required property int index
+                  readonly property bool current: !!root.provider && root.provider.providerId === modelData.providerId
+                  readonly property var meter: root.chipMeter(modelData)
+                  readonly property int freeResetCount: Aggregate.activeResetExpiries(modelData.resetCredits, root.nowMs).length
+                  readonly property var next: {
+                    var windows = root.limitWindows(modelData)
+                    var best = null
+                    for (var i = 0; i < windows.length; i++) {
+                      var ms = root.resetMsFor(windows[i])
+                      if (ms > 0 && (!best || ms < root.resetMsFor(best))) best = windows[i]
+                    }
+                    return best
+                  }
+                  width: accountComparison.width
+                  height: Style.space(48)
+                  radius: root.controlRadius
+                  color: current ? root.alpha(Commons.Color.accent, 0.10)
+                    : (accountRowHover.containsMouse ? root.alpha(root.foreground, 0.05) : "transparent")
+                  border.width: current ? 1 : 0
+                  border.color: root.alpha(Commons.Color.accent, 0.30)
+
+                  MouseArea {
+                    id: accountRowHover
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.selectedProviderId = accountRow.modelData.providerId
+                  }
+
+                  Item {
+                    id: accountRowMark
+                    anchors.left: parent.left
+                    anchors.leftMargin: Style.space(6)
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(34)
+                    height: width
+
+                    ChipRing {
+                      anchors.fill: parent
+                      visible: !!accountRow.meter
+                      value: accountRow.meter ? accountRow.meter.value : -1
+                      color: root.colorForSeverity(accountRow.meter ? accountRow.meter.severity : "ok")
+                    }
+
+                    ProviderMark {
+                      anchors.centerIn: parent
+                      width: Style.space(16)
+                      height: width
+                      provider: accountRow.modelData
+                    }
+                  }
+
+                  Column {
+                    anchors.left: accountRowMark.right
+                    anchors.leftMargin: Style.space(10)
+                    anchors.right: useAccountButton.left
+                    anchors.rightMargin: Style.space(8)
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(2)
+
+                    Text {
+                      width: parent.width
+                      text: accountRow.modelData.providerName
+                      textFormat: Text.PlainText
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                      elide: Text.ElideRight
+                    }
+
+                    Text {
+                      width: parent.width
+                      text: String(accountRow.modelData.usageStatusText || "") !== ""
+                        ? String(accountRow.modelData.usageStatusText)
+                        : root.providerPercentText(accountRow.modelData)
+                          + (accountRow.next ? " · " + String(accountRow.next.title || "Limit").toLowerCase()
+                            + " resets in " + root.formatDuration(root.resetMsFor(accountRow.next)) : "")
+                          + (accountRow.freeResetCount > 0 ? " · " + accountRow.freeResetCount
+                            + " free reset" + (accountRow.freeResetCount === 1 ? "" : "s") : "")
+                      textFormat: Text.PlainText
+                      color: String(accountRow.modelData.usageStatusText || "") !== ""
+                        ? root.textFor(root.statusColor(accountRow.modelData)) : root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      elide: Text.ElideRight
+                    }
+                  }
+
+                  LaunchAccountButton {
+
+                    radius: root.controlRadius
+                    id: useAccountButton
+                    anchors.right: parent.right
+                    anchors.rightMargin: Style.space(6)
+                    anchors.verticalCenter: parent.verticalCenter
+                    providerBrand: root.accountBrand
+                    accountId: accountRow.modelData.providerId
+                    enabled: accountId === providerBrand || !!usage.accountProfiles[accountId]
+                  }
+                }
+              }
+            }
+          }
+
+          // ---------- Empty view ----------
+          // A view with nothing to draw says why, instead of ending in a
+          // blank strip under the tabs.
+          BorderSurface {
+            id: emptyViewCard
+            opacity: root.viewFade
+            readonly property bool viewEmpty: root.viewTab === "usage"
+              ? !(root.ringWindows.length > 0 || todayTiles.visible || freeResetsCard.visible
+                || balanceSection.visible || limitsSection.visible || accountsCard.visible)
+              : root.viewTab === "activity" ? !(activityCard.visible || historyCard.visible)
+              : root.viewTab === "models" ? !(tokenMixCard.visible || detailModelSection.visible)
+              : !costSection.visible
+            visible: !root.settingsOpen && !!root.provider && viewEmpty
+            width: parent.width
+            implicitHeight: emptyViewContent.implicitHeight + Style.space(32)
+            color: "transparent"
+            borderSpec: Border.flat(root.alpha(root.foreground, 0.14), 1)
+            radius: root.cardRadius
+
+            Column {
+              id: emptyViewContent
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(18)
+              anchors.rightMargin: Style.space(18)
+              spacing: Style.space(6)
+
+              Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: root.viewTab === "usage" ? "󰓅" : root.viewTab === "activity" ? "󰸘"
+                  : root.viewTab === "models" ? "󰘚" : "󰄔"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Math.round(Style.font.display * 0.9)
+              }
+
+              Text {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                text: {
+                  var name = root.provider ? root.provider.providerName : "This provider"
+                  var waiting = root.provider && String(root.provider.usageStatusText || "") !== ""
+                  if (root.viewTab === "usage")
+                    return waiting ? "Nothing to show until " + name + " reports again." : name + " reports no limits or usage for today."
+                  if (root.viewTab === "activity") return name + " doesn't report daily token history."
+                  if (root.viewTab === "models") return name + " doesn't report per-model token use."
+                  return "No plan usage or API-rate data to compare yet."
+                }
+                textFormat: Text.PlainText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+            }
+          }
+
+          // ---------- Token mix (Details) ----------
+          // Where the tokens actually went: fresh input, output, and prompt
+          // cache traffic, with the cache hit share that explains why a
+          // "billion-token" month is mostly cheap cache reads.
+          BorderSurface {
+            id: tokenMixCard
+            opacity: root.viewFade
+            visible: root.viewTab === "models" && !root.settingsOpen && !!root.tokenMixData && root.tokenMixData.total > 0
+            width: parent.width
+            implicitHeight: tokenMixContent.implicitHeight + Style.space(28)
+            color: root.alpha(root.foreground, 0.035)
+            borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+            radius: root.cardRadius
+
+            readonly property var segments: {
+              var m = root.tokenMixData
+              if (!m || !(m.total > 0)) return []
+              return [
+                { label: "Cache read", value: m.cacheRead, color: root.seriesColor(0) },
+                { label: "Cache write", value: m.cacheWrite, color: root.seriesColor(1) },
+                { label: "Input", value: m.input, color: root.seriesColor(2) },
+                { label: "Output", value: m.output, color: root.seriesColor(3) }
+              ]
+            }
+
+            Column {
+              id: tokenMixContent
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
@@ -2155,739 +2877,94 @@ Panel {
               anchors.rightMargin: Style.space(14)
               spacing: Style.space(10)
 
-              PanelSectionHeader {
+              CardTitle {
                 width: parent.width
-                text: "Token use by model"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
+                glyph: "󱘲"
+                text: "Token mix"
+                note: "all time" + (root.tokenMixData && root.tokenMixData.cacheHitRate >= 0
+                  ? " · " + Math.round(root.tokenMixData.cacheHitRate * 100) + "% cache hit" : "")
               }
 
               Item {
                 width: parent.width
-                implicitHeight: modelHeading.implicitHeight
+                height: Style.space(12)
+                clip: true
 
-                Text {
-                  id: modelHeading
-                  text: "MODEL"
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.bold: true
-                  anchors.left: parent.left
-                  anchors.verticalCenter: parent.verticalCenter
-                }
-
-                Text {
-                  text: "TOKENS"
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.bold: true
-                  anchors.right: parent.right
-                  anchors.rightMargin: Style.space(8)
-                  anchors.verticalCenter: parent.verticalCenter
-                }
-              }
-
-              Repeater {
-                model: root.detailModels
-
-                ModelRow {
-                  required property var modelData
-                  width: detailModelContent.width
-                  row: modelData
-                  share: modelData.total / Math.max(1, root.detailModels[0].total)
-                }
-              }
-            }
-          }
-
-          // ---------- Plan vs API (Details only) ----------------------------
-          // Keep the accounting question in one place: what the provider says
-          // was used on the plan/credit ledger, and what the same local token
-          // usage would cost at published API rates. The second number is an
-          // equivalent, never an invoice or a subscription price.
-          Column {
-            id: costSection
-            visible: root.expanded && !root.settingsOpen
-              && root.costProviderRows.length > 0
-            width: parent.width
-            spacing: Style.space(10)
-
-            BorderSurface {
-              id: costProviderOverview
-              visible: root.costProviderRows.length > 0
-              width: parent.width
-              implicitHeight: providerOverviewContent.implicitHeight + Style.space(28)
-              color: root.alpha(root.foreground, 0.035)
-              borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-              radius: Style.cornerRadius
-
-              Column {
-                id: providerOverviewContent
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.leftMargin: Style.space(14)
-                anchors.rightMargin: Style.space(14)
-                spacing: Style.space(8)
-
-                PanelSectionHeader {
-                  width: parent.width
-                  text: "All providers"
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                }
-
-                Text {
-                  width: parent.width
-                  text: "Estimated at published API rates · periods vary by provider"
-                  textFormat: Text.PlainText
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
-                }
-
-                Item {
-                  width: parent.width
-                  implicitHeight: providerTableHeading.implicitHeight
-
-                  Text {
-                    id: providerTableHeading
-                    text: "PROVIDER"
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    font.bold: true
-                    anchors.left: parent.left
-                    anchors.verticalCenter: parent.verticalCenter
-                  }
-
-                  Text {
-                    text: "ON PLAN / CREDIT"
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    font.bold: true
-                    horizontalAlignment: Text.AlignRight
-                    anchors.right: providerApiColumn.left
-                    anchors.rightMargin: Style.space(10)
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(94)
-                  }
-
-                  Text {
-                    id: providerApiColumn
-                    text: "API EST."
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    font.bold: true
-                    horizontalAlignment: Text.AlignRight
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(78)
-                  }
-                }
-
-                Repeater {
-                  model: root.costProviderRows
-
-                  Item {
-                    id: providerCostRow
-                    required property var modelData
-                    width: providerOverviewContent.width
-                    height: Style.space(50)
-
-                    Rectangle {
-                      anchors.fill: parent
-                      radius: Style.cornerRadius
-                      color: root.provider && root.provider.providerId === providerCostRow.modelData.providerId
-                        ? root.alpha(Color.accent, 0.10) : "transparent"
-                    }
-
-                    Text {
-                      id: providerCostName
-                      text: String(providerCostRow.modelData.providerName || "Provider")
-                      textFormat: Text.PlainText
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                      font.bold: true
-                      elide: Text.ElideRight
-                      anchors.left: parent.left
-                      anchors.right: providerCostPlanValue.left
-                      anchors.rightMargin: Style.space(8)
-                      anchors.top: parent.top
-                      anchors.topMargin: Style.space(4)
-                    }
-
-                    Text {
-                      id: providerCostHint
-                      text: root.costPlanHint(providerCostRow.modelData)
-                      textFormat: Text.PlainText
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      elide: Text.ElideRight
-                      anchors.right: providerCostPlanValue.left
-                      anchors.rightMargin: Style.space(8)
-                      anchors.left: parent.left
-                      anchors.top: providerCostName.bottom
-                      anchors.topMargin: Style.space(1)
-                    }
-
-                    Text {
-                      id: providerCostPlanValue
-                      width: Style.space(94)
-                      text: root.costPlanValue(providerCostRow.modelData)
-                      textFormat: Text.PlainText
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                      font.bold: true
-                      horizontalAlignment: Text.AlignRight
-                      anchors.right: providerCostApiValue.left
-                      anchors.rightMargin: Style.space(10)
-                      anchors.top: parent.top
-                      anchors.topMargin: Style.space(4)
-                    }
-
-                    Text {
-                      id: providerCostApiValue
-                      width: Style.space(78)
-                      text: root.costApiValue(providerCostRow.modelData)
-                      textFormat: Text.PlainText
-                      color: providerCostRow.modelData.hasCost ? root.foreground : root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                      font.bold: providerCostRow.modelData.hasCost
-                      horizontalAlignment: Text.AlignRight
-                      anchors.right: parent.right
-                      anchors.top: parent.top
-                      anchors.topMargin: Style.space(4)
-                    }
-
-                    Text {
-                      width: providerCostApiValue.width
-                      text: !providerCostRow.modelData.hasCost ? "No estimate"
-                        : (providerCostRow.modelData.incomplete ? "Partial" : "Estimate")
-                          + (providerCostRow.modelData.period ? " · " + providerCostRow.modelData.period : "")
-                      textFormat: Text.PlainText
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      horizontalAlignment: Text.AlignRight
-                      elide: Text.ElideRight
-                      anchors.right: parent.right
-                      anchors.top: providerCostApiValue.bottom
-                      anchors.topMargin: Style.space(1)
-                    }
-
-                    Rectangle {
-                      id: providerUsageTrack
-                      visible: Number(providerCostRow.modelData.usagePercent) >= 0
-                      anchors.left: parent.left
-                      anchors.right: parent.right
-                      anchors.bottom: parent.bottom
-                      height: Math.max(Style.space(3), Math.round(Style.spacing.controlHeight * 0.10))
-                      radius: height / 2
-                      color: root.track
-                    }
-
-                    Rectangle {
-                      anchors.left: providerUsageTrack.left
-                      anchors.verticalCenter: providerUsageTrack.verticalCenter
-                      width: providerUsageTrack.width * root.clamp(Number(providerCostRow.modelData.usagePercent || 0), 0, 1)
-                      height: providerUsageTrack.height
-                      radius: providerUsageTrack.radius
-                      color: root.provider && root.provider.providerId === providerCostRow.modelData.providerId
-                        ? root.foreground : Color.accent
-                    }
-                  }
-                }
-              }
-            }
-
-            BorderSurface {
-              id: costValueCard
-              visible: !!root.provider
-              width: parent.width
-              implicitHeight: costValueContent.implicitHeight + Style.space(36)
-              color: root.alpha(root.foreground, 0.035)
-              borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-              radius: Style.cornerRadius
-
-              Column {
-                id: costValueContent
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.leftMargin: Style.space(18)
-                anchors.rightMargin: Style.space(18)
-                spacing: Style.space(14)
-
-                PanelSectionHeader {
-                  width: parent.width
-                  text: "If billed by API" + (root.cost && root.cost.period ? " · " + root.cost.period : "")
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                }
-
-                Text {
-                  width: parent.width
-                  text: root.cost ? root.formatUsd(root.cost.estimateUsd) : "—"
-                  textFormat: Text.PlainText
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.display
-                  font.bold: true
-                  elide: Text.ElideRight
-                }
-
-                Text {
-                  width: parent.width
-                  text: "Estimated at published API rates · not a bill"
-                  textFormat: Text.PlainText
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
-                }
-
-                Text {
-                  id: costDisclosure
-                  visible: !!root.provider && (!root.cost || root.cost.incomplete)
-                  width: parent.width
-                  text: !root.cost
-                    ? "No priced token total for this provider yet."
-                    : "Partial estimate · " + root.unpricedModelText(root.cost)
-                  textFormat: Text.PlainText
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
+                Rectangle {
+                  anchors.fill: parent
+                  radius: height / 2
+                  color: root.track
                 }
 
                 Row {
-                  id: costMetrics
-                  width: parent.width
-                  spacing: Style.space(10)
-
-                  CostMetric {
-                    width: (costMetrics.width - costMetrics.spacing) / 2
-                    valueText: root.costPlanValue(root.costProviderRow(root.provider))
-                    label: root.costPlanLabel(root.costProviderRow(root.provider))
-                    hint: root.costPlanHint(root.costProviderRow(root.provider))
-                  }
-
-                  CostMetric {
-                    width: (costMetrics.width - costMetrics.spacing) / 2
-                    valueText: root.costSummary && root.costSummary.hasDailyAverage
-                      ? root.formatUsd(root.costSummary.averageDailyUsd) : "—"
-                    label: "Avg / day"
-                    hint: root.costSummary && root.costSummary.hasDailyAverage
-                      ? root.costSummary.averageDailyDays + " recorded days" : "No day count"
-                  }
-                }
-
-                Column {
-                  id: costDailyBlock
-                  visible: !!root.cost && root.costDailyRows.length > 0
-                  width: parent.width
-                  spacing: Style.space(10)
-
-                  PanelSectionHeader {
-                    width: parent.width
-                    text: "Daily API trend"
-                    foreground: root.foreground
-                    fontFamily: root.fontFamily
-                  }
-
-                  Text {
-                    // Day count is dropped here: it's already stated by the
-                    // "Avg / recorded day" metric's hint above, so this line
-                    // only adds what that metric doesn't cover.
-                    visible: root.costDailyRows.length > 0
-                    width: parent.width
-                    text: root.costSummary
-                      ? root.formatUsd(root.costSummary.dailyTotalUsd)
-                        + (root.costSummary.dailySource === "reported" ? " reported" : " derived")
-                      : ""
-                    textFormat: Text.PlainText
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
-
-                  Item {
-                    id: costDailyChart
-                    visible: root.costDailyRows.length > 0
-                    width: parent.width
-                    height: Style.space(166)
-
-                    readonly property real axisLeft: Style.space(48)
-                    readonly property real axisRight: Style.space(8)
-                    readonly property real axisTop: Style.space(10)
-                    readonly property real axisBottom: Style.space(24)
-                    readonly property real plotWidth: Math.max(0, width - axisLeft - axisRight)
-                    readonly property real plotHeight: Math.max(0, height - axisTop - axisBottom)
-                    readonly property real peak: root.costSummary
-                      ? Math.max(0, Number(root.costSummary.dailyPeakUsd || 0)) : 0
-
-                    Repeater {
-                      model: [0, 0.5, 1]
-
-                      Item {
-                        required property real modelData
-                        width: costDailyChart.width
-                        height: 1
-                        y: costDailyChart.axisTop
-                          + costDailyChart.plotHeight * (1 - modelData)
-
-                        Text {
-                          width: costDailyChart.axisLeft - Style.space(8)
-                          height: Style.space(14)
-                          y: -height / 2
-                          text: root.formatUsd(costDailyChart.peak * modelData)
-                          textFormat: Text.PlainText
-                          color: root.dim
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.caption
-                          horizontalAlignment: Text.AlignRight
-                          elide: Text.ElideRight
-                        }
-
-                        Rectangle {
-                          x: costDailyChart.axisLeft
-                          width: costDailyChart.plotWidth
-                          height: 1
-                          color: root.alpha(root.foreground, 0.14)
-                        }
-                      }
-                    }
-
-                    Repeater {
-                      model: root.costDailyRows
-
-                      Item {
-                        id: costDayBar
-                        required property var modelData
-                        required property int index
-                        width: costDailyChart.plotWidth / Math.max(1, root.costDailyRows.length)
-                        height: costDailyChart.plotHeight
-                        x: costDailyChart.axisLeft + index * width
-                        y: costDailyChart.axisTop
-
-                        Rectangle {
-                          width: Math.max(3, Math.min(parent.width * 0.66, parent.width - Style.space(4)))
-                          height: Number(costDayBar.modelData.usd || 0) > 0
-                            ? Math.max(2, parent.height * Math.min(1,
-                              Number(costDayBar.modelData.usd || 0) / Math.max(0.0001, costDailyChart.peak)))
-                            : 1
-                          anchors.bottom: parent.bottom
-                          anchors.horizontalCenter: parent.horizontalCenter
-                          radius: Math.min(width / 2, Style.cornerRadius)
-                          color: costDayBar.index === root.costDailyRows.length - 1
-                            ? root.foreground : Color.accent
-                          opacity: costDayBar.index === root.costDailyRows.length - 1 ? 1.0 : 0.78
-                        }
-
-                        MouseArea {
-                          id: costDayHover
-                          anchors.fill: parent
-                          hoverEnabled: true
-                          acceptedButtons: Qt.NoButton
-                        }
-
-                        PanelToolTip {
-                          visible: costDayHover.containsMouse
-                          text: root.shortHistoryDate(costDayBar.modelData.date) + " · "
-                            + root.formatUsd(costDayBar.modelData.usd)
-                          fontFamily: root.fontFamily
-                        }
-                      }
-                    }
-
-                    Row {
-                      id: costDailyLabels
-                      x: costDailyChart.axisLeft
-                      y: costDailyChart.height - height
-                      width: costDailyChart.plotWidth
-                      height: Style.space(16)
-
-                      Repeater {
-                        model: root.costDailyRows
-
-                        Text {
-                          required property var modelData
-                          required property int index
-                          width: costDailyLabels.width / Math.max(1, root.costDailyRows.length)
-                          visible: index === 0 || index === root.costDailyRows.length - 1
-                            || (root.costDailyRows.length > 2
-                              && index === Math.floor((root.costDailyRows.length - 1) / 2))
-                          text: root.shortHistoryDate(modelData.date)
-                          textFormat: Text.PlainText
-                          color: index === root.costDailyRows.length - 1 ? root.foreground : root.dim
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.caption
-                          horizontalAlignment: Text.AlignHCenter
-                          elide: Text.ElideRight
-                        }
-                      }
-                    }
-                  }
-                }
-
-                Column {
-                  id: costModelChart
-                  visible: root.costModelRows.length > 0
-                  width: parent.width
-                  spacing: Style.space(10)
-
-                  PanelSectionHeader {
-                    width: parent.width
-                    text: "API equivalent by model"
-                    foreground: root.foreground
-                    fontFamily: root.fontFamily
-                  }
+                  id: mixBar
+                  anchors.fill: parent
+                  spacing: 2
 
                   Repeater {
-                    model: root.costModelRows
+                    model: tokenMixCard.segments
 
-                    Item {
-                      id: costModelRow
+                    Rectangle {
                       required property var modelData
-                      width: costModelChart.width
-                      height: Style.space(44)
-
-                      Text {
-                        id: costModelName
-                        text: usage.friendlyModelName(costModelRow.modelData.model)
-                        textFormat: Text.PlainText
-                        color: root.foreground
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.bodySmall
-                        font.bold: true
-                        elide: Text.ElideRight
-                        anchors.left: parent.left
-                        anchors.right: costModelValue.left
-                        anchors.rightMargin: Style.space(8)
-                        anchors.verticalCenter: parent.verticalCenter
-                      }
-
-                      Text {
-                        id: costModelValue
-                        width: Style.space(78)
-                        text: root.formatUsd(costModelRow.modelData.usd)
-                        textFormat: Text.PlainText
-                        color: root.foreground
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.bodySmall
-                        font.bold: true
-                        horizontalAlignment: Text.AlignRight
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                      }
-
-                      Rectangle {
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        anchors.bottom: parent.bottom
-                        height: Math.max(Style.space(3), Math.round(Style.spacing.controlHeight * 0.10))
-                        radius: height / 2
-                        color: root.track
-                      }
-
-                      Rectangle {
-                        anchors.left: parent.left
-                        anchors.bottom: parent.bottom
-                        width: parent.width * root.clamp(Number(costModelRow.modelData.share || 0), 0, 1)
-                        height: Math.max(Style.space(3), Math.round(Style.spacing.controlHeight * 0.10))
-                        radius: height / 2
-                        color: Color.accent
-
-                        Behavior on width {
-                          NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
-                        }
-                      }
-
+                      required property int index
+                      height: mixBar.height
+                      width: Math.max(0, (mixBar.width - mixBar.spacing * 3) * modelData.value
+                        / Math.max(1, root.tokenMixData ? root.tokenMixData.total : 1))
+                      radius: height / 2
+                      color: modelData.color
+                      visible: width >= 1
                     }
                   }
                 }
+              }
 
-                Text {
-                  visible: !!root.cost && root.costModelRows.length === 0
-                  width: parent.width
-                  text: "No model-level API pricing was provided."
-                  textFormat: Text.PlainText
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
+              Grid {
+                width: parent.width
+                columns: 2
+                rowSpacing: Style.space(6)
+                columnSpacing: Style.space(12)
+
+                Repeater {
+                  model: tokenMixCard.segments
+
+                  Item {
+                    required property var modelData
+                    width: (tokenMixContent.width - Style.space(12)) / 2
+                    implicitHeight: mixLabel.implicitHeight
+
+                    Rectangle {
+                      id: mixSwatch
+                      anchors.left: parent.left
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: Style.space(8)
+                      height: width
+                      radius: width / 2
+                      color: modelData.color
+                    }
+
+                    Text {
+                      id: mixLabel
+                      anchors.left: mixSwatch.right
+                      anchors.leftMargin: Style.space(6)
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: modelData.label
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    Text {
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: usage.formatTokenCount(modelData.value) + " · "
+                        + Math.round(modelData.value / Math.max(1, root.tokenMixData ? root.tokenMixData.total : 1) * 100) + "%"
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
                 }
-
-                Text {
-                  visible: !!root.cost && root.costDailyRows.length === 0
-                    && root.costSummary && root.costSummary.hasDailyAverage
-                  width: parent.width
-                  text: root.costSummary
-                    ? "No day-by-day pricing data · average uses "
-                      + root.costSummary.averageDailyDays + " recorded usage days."
-                    : ""
-                  textFormat: Text.PlainText
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
-                }
-
-                Text {
-                  visible: text !== ""
-                  width: parent.width
-                  text: root.cost ? root.costFooterText(root.cost, root.costSummary) : ""
-                  textFormat: Text.PlainText
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
               }
-            }
-          }
-
-          // ---------- Usage ----------
-          PanelSeparator {
-            visible: usageSection.visible
-            foreground: root.foreground
-          }
-
-          Column {
-            id: usageSection
-            // Replaced by the full labelled history chart in Details. A
-            // three-day mini-chart followed by a second chart was redundant
-            // and made both the data and the scrolling worse.
-            visible: false
-            width: parent.width
-            spacing: Style.spacing.md
-
-            readonly property int maxSummaryDays: 3
-            readonly property int availableDayCount: root.provider && root.provider.recentDays
-              ? root.provider.recentDays.length : 0
-            readonly property var days: root.summaryDays(root.provider, maxSummaryDays)
-            readonly property real peak: Math.max(1, root.dayPeak(days))
-
-            PanelSectionHeader {
-              width: parent.width
-              text: "Recent activity"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: usageSection.days
-
-              DayRow {
-                required property var modelData
-                required property int index
-
-                width: usageSection.width
-                day: modelData
-                ratio: Number(modelData.messageCount || 0) / usageSection.peak
-                // By date, not by position: the Claude stats-cache fallback can
-                // hand us a window that stops short of today.
-                today: String(modelData.date || "") === root.todayDate()
-              }
-            }
-
-            Text {
-              visible: usageSection.availableDayCount > usageSection.days.length
-              width: parent.width
-              text: usageSection.days.length + " of " + usageSection.availableDayCount
-                + " days shown · Details has the full history"
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
-          }
-
-          // ---------- Models ----------
-          PanelSeparator {
-            visible: modelSection.visible
-            foreground: root.foreground
-          }
-
-          Column {
-            id: modelSection
-            // Keep Details focused on the time-series users can act on.
-            // Model totals remain available in the collector records and
-            // should return only with a purpose-built comparison view.
-            visible: false
-            width: parent.width
-            spacing: Style.spacing.md
-
-            PanelSectionHeader {
-              width: parent.width
-              text: "Most-used models"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: root.models
-
-              ModelRow {
-                required property var modelData
-                width: modelSection.width
-                row: modelData
-                // Scaled to the heaviest model, so the top row is always full —
-                // the same scale-to-peak the weekly chart uses for its busiest day.
-                share: modelData.total / Math.max(1, root.models[0].total)
-              }
-            }
-          }
-
-          // ---------- Expanded: combined view across every enabled
-          // provider, not just the currently selected chip.
-          PanelSeparator {
-            visible: false
-            foreground: root.foreground
-          }
-
-          Column {
-            id: expandedSection
-            visible: false
-            width: parent.width
-            spacing: Style.spacing.md
-
-            PanelSectionHeader {
-              width: parent.width
-              text: "TOKENS BY MODEL · ALL SUBSCRIPTIONS"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Repeater {
-              model: root.allModels
-
-              ModelRow {
-                required property var modelData
-                width: expandedSection.width
-                row: modelData
-                share: modelData.total / Math.max(1, root.allModels[0].total)
-              }
-            }
-
-            Text {
-              visible: root.allModels.length === 0
-              width: parent.width
-              text: "No model usage yet across enabled subscriptions."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              horizontalAlignment: Text.AlignHCenter
-              wrapMode: Text.WordWrap
             }
           }
 
@@ -2895,53 +2972,57 @@ Panel {
           // selected provider. The line makes the trend readable at a glance;
           // the axis labels make the scale explicit instead of asking the
           // viewer to infer it from bar height.
-          PanelSeparator {
-            visible: root.expanded
-            foreground: root.foreground
-          }
+          BorderSurface {
+            id: historyCard
+            opacity: root.viewFade
+            // Nothing to plot for a provider that reports no daily history
+            // at all (a billing-only collector); an empty "0 days" card was
+            // just noise.
+            visible: root.viewTab === "activity" && !root.settingsOpen && !!root.provider
+              && Array.isArray(root.provider.recentDays) && root.provider.recentDays.length > 0
+            width: parent.width
+            implicitHeight: historySection.implicitHeight + Style.space(28)
+            color: root.alpha(root.foreground, 0.035)
+            borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+            radius: root.cardRadius
 
           Column {
             id: historySection
-            visible: root.expanded
-            width: parent.width
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: Style.space(14)
+            anchors.rightMargin: Style.space(14)
             spacing: Style.spacing.md
 
-            PanelSectionHeader {
+            CardTitle {
               width: parent.width
-              text: "History"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-
-            Text {
-              visible: !root.provider
-              width: parent.width
-              text: "Select a subscription above to see its history."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              horizontalAlignment: Text.AlignHCenter
-              wrapMode: Text.WordWrap
-            }
-
-            Text {
-              visible: !!(root.historySeries && root.historySeries.ok)
-              width: parent.width
-              text: root.historySeries
-                ? root.historySeries.points.length + " recorded days · "
-                  + usage.formatTokenCount(root.historySeriesTotal(root.historySeries)) + " tokens"
+              glyph: "󰺓"
+              text: "Token trend"
+              note: root.historySeries && root.historySeries.ok
+                ? usage.formatTokenCount(root.historySeriesTotal(root.historySeries)) + " · "
+                  + root.historySeries.points.length + " days"
                 : ""
-              textFormat: Text.PlainText
+            }
+
+            Text {
+              visible: !!(root.historySeries && root.historySeries.ok && root.historySeries.peak <= 0)
+              width: parent.width
+              topPadding: Style.space(6)
+              bottomPadding: Style.space(6)
+              text: "No tokens recorded in the last " + (root.historySeries ? root.historySeries.points.length : 0) + " days."
               color: root.dim
               font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
+              font.pixelSize: Style.font.bodySmall
+              horizontalAlignment: Text.AlignHCenter
             }
 
             Canvas {
               id: historyCanvas
-              visible: !!(root.historySeries && root.historySeries.ok && root.historySeries.points.length > 0)
+              visible: !!(root.historySeries && root.historySeries.ok && root.historySeries.points.length > 0
+                && root.historySeries.peak > 0)
               width: parent.width
-              height: Style.space(146)
+              height: Style.space(150)
 
               readonly property real axisLeft: Style.space(46)
               readonly property real axisRight: Style.space(8)
@@ -2949,7 +3030,14 @@ Panel {
               readonly property real axisBottom: Style.space(22)
 
               property var series: root.historySeries
-              property color lineColor: Color.accent
+              property color lineColor: Commons.Color.accent
+              property int hoverIndex: -1
+
+              onHoverIndexChanged: requestPaint()
+              // Repaint on a live theme switch: onPaint reads these root colors
+              // directly, and Canvas does not track them on its own.
+              readonly property string themeKey: [root.foreground, root.surface, root.track, root.dim, root.fontFamily].join("|")
+              onThemeKeyChanged: requestPaint()
 
               onSeriesChanged: requestPaint()
               onWidthChanged: requestPaint()
@@ -3013,28 +3101,71 @@ Panel {
                     return bottom - plotHeight * Math.min(1, value / scale)
                   }
 
+                  var xs = []
+                  var ys = []
+                  for (var i = 0; i < n; i++) {
+                    xs.push(pointX(i))
+                    ys.push(pointY(points[i] || {}))
+                  }
+
+                  // Interpolate through each day's measured value. Horizontal
+                  // tangents keep the curve inside the adjacent samples.
+                  function tracePath() {
+                    ctx.moveTo(xs[0], ys[0])
+                    for (var k = 1; k < n; k++) {
+                      var mx = (xs[k - 1] + xs[k]) / 2
+                      ctx.bezierCurveTo(mx, ys[k - 1], mx, ys[k], xs[k], ys[k])
+                    }
+                  }
+
+                  var area = ctx.createLinearGradient(0, top, 0, bottom)
+                  area.addColorStop(0, root.alpha(historyCanvas.lineColor, 0.32))
+                  area.addColorStop(1, root.alpha(historyCanvas.lineColor, 0.0))
+                  ctx.fillStyle = area
+                  ctx.beginPath()
+                  tracePath()
+                  ctx.lineTo(xs[n - 1], bottom)
+                  ctx.lineTo(xs[0], bottom)
+                  ctx.closePath()
+                  ctx.fill()
+
                   ctx.strokeStyle = historyCanvas.lineColor
                   ctx.lineWidth = 2
                   ctx.lineCap = "round"
                   ctx.lineJoin = "round"
                   ctx.beginPath()
-                  for (var i = 0; i < n; i++) {
-                    var linePoint = points[i] || {}
-                    var lineX = pointX(i)
-                    var lineY = pointY(linePoint)
-                    if (i === 0) ctx.moveTo(lineX, lineY)
-                    else ctx.lineTo(lineX, lineY)
-                  }
+                  tracePath()
                   ctx.stroke()
 
-                  // A small dot preserves zero-usage days and makes the
-                  // latest point easy to find without filled histogram bars.
-                  for (var j = 0; j < n; j++) {
-                    var point = points[j] || {}
-                    ctx.fillStyle = String(point.date || "") === root.todayDate()
-                      ? root.foreground : historyCanvas.lineColor
+                  if (historyCanvas.hoverIndex >= 0 && historyCanvas.hoverIndex < n) {
+                    var hx = Math.round(xs[historyCanvas.hoverIndex]) + 0.5
+                    ctx.strokeStyle = root.alpha(root.foreground, 0.35)
+                    ctx.lineWidth = 1
                     ctx.beginPath()
-                    ctx.arc(pointX(j), pointY(point), j === n - 1 ? 3.5 : 2.5, 0, Math.PI * 2)
+                    ctx.moveTo(hx, top)
+                    ctx.lineTo(hx, bottom)
+                    ctx.stroke()
+                    ctx.fillStyle = historyCanvas.lineColor
+                    ctx.beginPath()
+                    ctx.arc(xs[historyCanvas.hoverIndex], ys[historyCanvas.hoverIndex], 4, 0, Math.PI * 2)
+                    ctx.fill()
+                  }
+
+                  // Mark the busiest day and the latest one; zero-usage days
+                  // stay visible as the line touching the baseline.
+                  var peakIndex = 0
+                  for (var j = 1; j < n; j++)
+                    if (Number(points[j].value || 0) > Number(points[peakIndex].value || 0)) peakIndex = j
+                  var marks = peakIndex === n - 1 ? [n - 1] : [peakIndex, n - 1]
+                  for (var m = 0; m < marks.length; m++) {
+                    var idx = marks[m]
+                    ctx.fillStyle = root.surface
+                    ctx.beginPath()
+                    ctx.arc(xs[idx], ys[idx], 5, 0, Math.PI * 2)
+                    ctx.fill()
+                    ctx.fillStyle = idx === n - 1 ? root.foreground : historyCanvas.lineColor
+                    ctx.beginPath()
+                    ctx.arc(xs[idx], ys[idx], 3.5, 0, Math.PI * 2)
                     ctx.fill()
                   }
                 } catch (e) {
@@ -3042,49 +3173,832 @@ Panel {
                   // blank strip, not take the rest of the panel down.
                 }
               }
+
+              MouseArea {
+                id: historyHover
+                anchors.fill: parent
+                hoverEnabled: true
+                acceptedButtons: Qt.NoButton
+                onExited: historyCanvas.hoverIndex = -1
+                onPositionChanged: function(mouse) {
+                  var s = historyCanvas.series
+                  var count = s && s.points ? s.points.length : 0
+                  var plot = historyCanvas.width - historyCanvas.axisLeft - historyCanvas.axisRight
+                  if (count === 0 || plot <= 0) { historyCanvas.hoverIndex = -1; return }
+                  var t = (mouse.x - historyCanvas.axisLeft) / plot
+                  historyCanvas.hoverIndex = count <= 1 ? 0 : Math.round(root.clamp(t, 0, 1) * (count - 1))
+                }
+              }
+
+              PanelToolTip {
+                visible: historyHover.containsMouse && historyCanvas.hoverIndex >= 0
+                text: {
+                  var s = historyCanvas.series
+                  var point = s && s.points ? s.points[historyCanvas.hoverIndex] : null
+                  return point ? root.dayTooltip({ date: point.date, messageCount: point.value },
+                    String(point.date) === root.todayDate()) : ""
+                }
+                fontFamily: root.fontFamily
+              }
             }
 
-            Row {
+            // Labels sit under their own data points (same x as the
+            // chart's pointX), positioned explicitly: a Row collapses the
+            // hidden in-between labels and piles the visible ones up.
+            Item {
               id: historyLabels
-              visible: !!(root.historySeries && root.historySeries.ok && root.historySeries.points.length > 0)
+              visible: historyCanvas.visible
               width: parent.width
+              height: Style.space(14)
 
               Repeater {
-                model: root.historySeries && root.historySeries.points ? root.historySeries.points : []
+                // Indexed, so a refresh updates rows in place instead of
+                // rebuilding them (rebuilt rows re-animated and re-laid out).
+                model: (root.historySeries && root.historySeries.points ? root.historySeries.points : []).length
 
                 Text {
-                  required property var modelData
+                  readonly property var modelData: (root.historySeries && root.historySeries.points ? root.historySeries.points : [])[index] || ({})
                   required property int index
-                  width: historyLabels.width / Math.max(1,
-                    root.historySeries && root.historySeries.points
-                      ? root.historySeries.points.length : 1)
-                  visible: {
-                    var count = root.historySeries && root.historySeries.points
-                      ? root.historySeries.points.length : 0
-                    return index === 0 || index === count - 1
-                      || (count > 2 && index === Math.floor((count - 1) / 2))
-                  }
+                  readonly property int count: root.historySeries && root.historySeries.points
+                    ? root.historySeries.points.length : 0
+                  readonly property real plotWidth: historyLabels.width - historyCanvas.axisLeft - historyCanvas.axisRight
+                  readonly property real pointX: count <= 1
+                    ? historyCanvas.axisLeft + plotWidth / 2
+                    : historyCanvas.axisLeft + plotWidth * index / (count - 1)
+                  x: root.clamp(pointX - implicitWidth / 2, 0, Math.max(0, historyLabels.width - implicitWidth))
+                  visible: index === 0 || index === count - 1
+                    || (count > 2 && index === Math.floor((count - 1) / 2))
                   text: root.shortHistoryDate(modelData.date)
-                  horizontalAlignment: Text.AlignHCenter
-                  color: root.historySeries && root.historySeries.points
-                    && index === root.historySeries.points.length - 1
-                    ? root.foreground : root.dim
+                  color: index === count - 1 ? root.foreground : root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                 }
               }
             }
 
-            Text {
-              visible: !!(root.historySeries && !root.historySeries.ok)
+          }
+          }
+
+          // ---------- Activity calendar (Details) ----------
+          // Five weeks (collectors keep up to 31 days) of the selected
+          // provider's daily tokens as a calendar
+          // heatmap: rows are weeks, columns Monday..Sunday. A day outside
+          // the collector's record is drawn hollow, never as a quiet zero.
+          BorderSurface {
+            id: activityCard
+            opacity: root.viewFade
+            visible: root.viewTab === "activity" && !root.settingsOpen && root.hasActivity && !!root.heatmap
+            width: parent.width
+            implicitHeight: activityContent.implicitHeight + Style.space(28)
+            color: root.alpha(root.foreground, 0.035)
+            borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+            radius: root.cardRadius
+
+            Column {
+              id: activityContent
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(14)
+              anchors.rightMargin: Style.space(14)
+              spacing: Style.space(10)
+
+              CardTitle {
+                width: parent.width
+                glyph: "󰸘"
+                text: "Activity"
+                note: root.activity ? root.activity.activeDays + " active of " + root.activity.recordedDays + " days" : ""
+              }
+
+              Row {
+                width: parent.width
+                spacing: Style.space(4)
+                readonly property real cellWidth: (width - spacing * 6) / 7
+
+                Repeater {
+                  model: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+                  Text {
+                    required property var modelData
+                    width: parent.cellWidth
+                    text: modelData
+                    horizontalAlignment: Text.AlignHCenter
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+              }
+
+              Column {
+                width: parent.width
+                spacing: Style.space(4)
+
+                Repeater {
+                  // Indexed, so a refresh updates rows in place instead of
+                  // rebuilding them (rebuilt rows re-animated and re-laid out).
+                  model: (root.heatmap ? root.heatmap.weeks : []).length
+
+                  Row {
+                    id: heatWeek
+                    readonly property var modelData: (root.heatmap ? root.heatmap.weeks : [])[index] || ({})
+                    required property int index
+                    width: parent.width
+                    spacing: Style.space(4)
+                    readonly property real cellWidth: (width - spacing * 6) / 7
+
+                    Repeater {
+                      // Indexed, so a refresh updates rows in place instead of
+                      // rebuilding them (rebuilt rows re-animated and re-laid out).
+                      model: (heatWeek.modelData).length
+
+                      Rectangle {
+                        id: heatCell
+                        readonly property var modelData: (heatWeek.modelData)[index] || ({})
+                        required property int index
+                        width: heatWeek.cellWidth
+                        height: Style.space(22)
+                        radius: Style.space(6)
+                        color: heatCell.modelData.future || heatCell.modelData.missing
+                          ? "transparent" : root.heatColor(heatCell.modelData.level)
+                        border.width: heatCell.modelData.today ? 2 : (heatCell.modelData.missing && !heatCell.modelData.future ? 1 : 0)
+                        border.color: heatCell.modelData.today ? root.foreground : root.alpha(root.foreground, 0.10)
+                        opacity: heatCell.modelData.future ? 0.0 : 1.0
+
+                        Text {
+                          anchors.centerIn: parent
+                          text: Number(String(heatCell.modelData.date).slice(8, 10))
+                          color: heatCell.modelData.future || heatCell.modelData.missing
+                            ? root.dim : root.inkOn(root.heatColor(heatCell.modelData.level))
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                          font.bold: heatCell.modelData.today
+                        }
+
+                        MouseArea {
+                          id: heatHover
+                          anchors.fill: parent
+                          hoverEnabled: !heatCell.modelData.future
+                          acceptedButtons: Qt.NoButton
+                        }
+
+                        PanelToolTip {
+                          visible: heatHover.containsMouse
+                          text: heatCell.modelData.missing
+                            ? root.shortHistoryDate(heatCell.modelData.date) + " · no record"
+                            : root.dayTooltip({ date: heatCell.modelData.date, messageCount: heatCell.modelData.value },
+                                heatCell.modelData.today)
+                          fontFamily: root.fontFamily
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+              Item {
+                width: parent.width
+                implicitHeight: heatLegend.implicitHeight
+
+                Row {
+                  id: heatLegend
+                  anchors.right: parent.right
+                  spacing: Style.space(4)
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Less"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Repeater {
+                    model: [0, 1, 2, 3, 4]
+
+                    Rectangle {
+                      required property int modelData
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: Style.space(10)
+                      height: width
+                      radius: Style.space(3)
+                      color: root.heatColor(modelData)
+                    }
+                  }
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "More"
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                Text {
+                  anchors.left: parent.left
+                  anchors.verticalCenter: heatLegend.verticalCenter
+                  text: root.heatmap && root.heatmap.peak > 0
+                    ? "Peak " + usage.formatTokenCount(root.heatmap.peak) + " / day" : ""
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
+                readonly property real tileWidth: (width - spacing * 2) / 3
+
+                StatTile {
+                  width: parent.tileWidth
+                  label: "Recorded"
+                  valueText: root.activity ? usage.formatTokenCount(root.activity.total) : "—"
+                  hint: "tokens recorded"
+                }
+
+                StatTile {
+                  width: parent.tileWidth
+                  label: "7-day avg"
+                  valueText: root.activity && root.activity.avg7 >= 0
+                    ? usage.formatTokenCount(Math.round(root.activity.avg7)) : "—"
+                  hint: "tokens / day"
+                }
+
+                StatTile {
+                  width: parent.tileWidth
+                  label: "Week vs last"
+                  valueText: root.activity && root.activity.weekChange !== null
+                    ? Insights.formatChange(root.activity.weekChange) : "—"
+                  hint: root.activity && root.activity.weekChange !== null
+                    ? (root.activity.weekChange === 0 ? "same usage" : (root.activity.weekChange > 0 ? "busier week" : "quieter week")) : "needs 14 days"
+                }
+              }
+            }
+          }
+
+          // ---------- Token usage by model ----------
+          // Details starts with the useful accounting view. Price information
+          // lives in the analytics card below, so this table stays about the
+          // provider's actual recorded token use and never repeats a cost.
+          BorderSurface {
+            id: detailModelSection
+            opacity: root.viewFade
+            visible: root.viewTab === "models" && !root.settingsOpen && root.detailModels.length > 0
+            width: parent.width
+            implicitHeight: detailModelContent.implicitHeight + Style.space(28)
+            color: root.alpha(root.foreground, 0.035)
+            borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+            radius: root.cardRadius
+
+            Column {
+              id: detailModelContent
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(14)
+              anchors.rightMargin: Style.space(14)
+              spacing: Style.space(10)
+
+              CardTitle {
+                width: parent.width
+                glyph: "󰘚"
+                text: "Token use by model"
+              }
+
+              Item {
+                width: parent.width
+                implicitHeight: modelHeading.implicitHeight
+
+                Text {
+                  id: modelHeading
+                  text: "MODEL"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Text {
+                  text: "TOKENS"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  anchors.right: parent.right
+                  anchors.rightMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+              }
+
+              Repeater {
+                // Indexed, so a refresh updates rows in place instead of
+                // rebuilding them (rebuilt rows re-animated and re-laid out).
+                model: (root.detailModels).length
+
+                ModelRow {
+                  readonly property var modelData: (root.detailModels)[index] || ({})
+                  required property int index
+                  width: detailModelContent.width
+                  row: modelData
+                  tint: root.seriesColor(index)
+                  share: modelData.total / Math.max(1, root.detailModels[0].total)
+                }
+              }
+            }
+          }
+
+          // ---------- Cost -------------------------------------------------
+          // What the recorded usage would cost at published API rates (an
+          // equivalent, never an invoice): one figure with one line of
+          // context, the days and the models behind it, and, when there is
+          // more than one, how the providers compare. The fine print (rate
+          // catalogue, coverage) is in the figure's tooltip.
+          Column {
+            id: costSection
+            opacity: root.viewFade
+            visible: root.expanded && !root.settingsOpen && root.viewTab === "cost"
+              && root.costProviderRows.length > 0
+            width: parent.width
+            spacing: Style.space(12)
+
+            BorderSurface {
+              id: costValueCard
+              visible: !!root.provider
               width: parent.width
-              text: root.historyUnavailableText(root.historySeries)
-              textFormat: Text.PlainText
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              horizontalAlignment: Text.AlignHCenter
-              wrapMode: Text.WordWrap
+              implicitHeight: costValueContent.implicitHeight + Style.space(28)
+              color: root.alpha(root.foreground, 0.035)
+              borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+              radius: root.cardRadius
+
+              Column {
+                id: costValueContent
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(14)
+                anchors.rightMargin: Style.space(14)
+                spacing: Style.space(14)
+
+                CardTitle {
+                  width: parent.width
+                  glyph: "󰄔"
+                  text: "At API prices"
+                  note: root.cost ? root.costPeriodLabel(root.cost.period) : ""
+                }
+
+                // The figure, and the pace it works out to.
+                Column {
+                  visible: !!root.cost
+                  width: parent.width
+                  spacing: Style.space(4)
+
+                  Text {
+                    id: costFigure
+                    width: Math.min(parent.width, implicitWidth)
+                    text: root.cost ? root.formatUsd(root.cost.estimateUsd) : "—"
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.display
+                    font.bold: true
+                    elide: Text.ElideRight
+
+                    MouseArea {
+                      id: costFigureHover
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      acceptedButtons: Qt.NoButton
+                    }
+
+                    PanelToolTip {
+                      visible: costFigureHover.containsMouse
+                      text: root.costDetailText(root.cost, root.costSummary)
+                      fontFamily: root.fontFamily
+                    }
+                  }
+
+                  Flow {
+                    id: costPace
+                    visible: !!root.costSummary && root.costSummary.hasDailyAverage
+                    width: parent.width
+                    spacing: Style.space(4)
+
+                    Text {
+                      text: root.costSummary ? root.formatUsd(root.costSummary.averageDailyUsd) : ""
+                      textFormat: Text.PlainText
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                    }
+
+                    Text {
+                      text: "a day ·"
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+
+                    Text {
+                      text: root.costSummary ? root.formatUsd(root.costSummary.averageDailyUsd * 30) : ""
+                      textFormat: Text.PlainText
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                    }
+
+                    Text {
+                      text: "a month at this pace"
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                  }
+                }
+
+                Text {
+                  id: costDisclosure
+                  visible: !!root.provider && (!root.cost || root.cost.incomplete)
+                  width: parent.width
+                  text: !root.cost
+                    ? "No API-price estimate for " + String(root.provider ? root.provider.providerName : "this provider") + "."
+                    : root.unpricedModelText(root.cost)
+                  textFormat: Text.PlainText
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
+                }
+
+                // By day: bars only, no axis; the peak is named above and
+                // every day on hover. The latest day is drawn in full ink.
+                Column {
+                  id: costDailyBlock
+                  visible: !!root.cost && root.costDailyRows.length > 0
+                  width: parent.width
+                  spacing: Style.space(6)
+
+                  Item {
+                    width: parent.width
+                    implicitHeight: costDailyTitle.implicitHeight
+
+                    Text {
+                      id: costDailyTitle
+                      text: "By day"
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                    }
+
+                    Text {
+                      anchors.right: parent.right
+                      anchors.verticalCenter: costDailyTitle.verticalCenter
+                      text: costDailyChart.peak > 0 ? "peak " + root.formatUsd(costDailyChart.peak) : ""
+                      textFormat: Text.PlainText
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+
+                  Item {
+                    id: costDailyChart
+                    width: parent.width
+                    height: Style.space(72)
+                    readonly property real peak: root.costSummary
+                      ? Math.max(0, Number(root.costSummary.dailyPeakUsd || 0)) : 0
+                    readonly property real slot: width / Math.max(1, root.costDailyRows.length)
+
+                    Rectangle {
+                      anchors.left: parent.left
+                      anchors.right: parent.right
+                      anchors.bottom: parent.bottom
+                      height: 1
+                      color: root.alpha(root.foreground, 0.10)
+                    }
+
+                    Repeater {
+                      // Indexed, so a refresh updates bars in place.
+                      model: (root.costDailyRows).length
+
+                      Item {
+                        id: costDayBar
+                        required property int index
+                        readonly property var modelData: (root.costDailyRows)[index] || ({})
+                        readonly property bool latest: index === root.costDailyRows.length - 1
+                        readonly property real usd: Number(modelData.usd || 0)
+                        width: costDailyChart.slot
+                        height: costDailyChart.height
+                        x: index * width
+
+                        Rectangle {
+                          width: Math.max(2, Math.min(parent.width - Style.space(2), Style.space(10)))
+                          height: costDayBar.usd > 0
+                            ? Math.max(2, parent.height * Math.min(1, costDayBar.usd / Math.max(0.0001, costDailyChart.peak)))
+                            : 0
+                          anchors.bottom: parent.bottom
+                          anchors.horizontalCenter: parent.horizontalCenter
+                          radius: Math.min(width / 2, Style.space(3))
+                          color: costDayBar.latest ? root.foreground
+                            : root.alpha(Commons.Color.accent, costDayHover.containsMouse ? 1 : 0.7)
+                        }
+
+                        MouseArea {
+                          id: costDayHover
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          acceptedButtons: Qt.NoButton
+                        }
+
+                        PanelToolTip {
+                          visible: costDayHover.containsMouse
+                          text: root.dayLabelFor(costDayBar.modelData.date) + " · " + root.formatUsd(costDayBar.usd)
+                          fontFamily: root.fontFamily
+                        }
+                      }
+                    }
+                  }
+
+                  Item {
+                    width: parent.width
+                    implicitHeight: costFirstDay.implicitHeight
+
+                    Text {
+                      id: costFirstDay
+                      text: root.costDailyRows.length > 0 ? root.shortHistoryDate(root.costDailyRows[0].date) : ""
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    Text {
+                      anchors.right: parent.right
+                      text: root.costDailyRows.length > 1
+                        ? root.shortHistoryDate(root.costDailyRows[root.costDailyRows.length - 1].date) : ""
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+                }
+
+                // By model: one stacked bar, then a line per model.
+                Column {
+                  id: costModelChart
+                  visible: !!root.cost && root.costModelRows.length > 0
+                  width: parent.width
+                  spacing: Style.space(6)
+
+                  Text {
+                    text: "By model"
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
+                  }
+
+                  Item {
+                    width: parent.width
+                    height: Style.space(8)
+
+                    Rectangle {
+                      anchors.fill: parent
+                      radius: height / 2
+                      color: root.track
+                    }
+
+                    Row {
+                      id: costModelStack
+                      anchors.fill: parent
+                      spacing: 2
+
+                      Repeater {
+                        model: (root.costModelRows).length
+
+                        Rectangle {
+                          required property int index
+                          readonly property var modelData: (root.costModelRows)[index] || ({})
+                          height: costModelStack.height
+                          width: Math.max(0, (costModelStack.width - costModelStack.spacing * Math.max(0, root.costModelRows.length - 1))
+                            * root.clamp(Number(modelData.share || 0), 0, 1))
+                          radius: height / 2
+                          color: root.modelColor(modelData.model, index)
+                          visible: width >= 1
+                        }
+                      }
+                    }
+                  }
+
+                  Repeater {
+                    model: (root.costModelRows).length
+
+                    Item {
+                      id: costModelRow
+                      required property int index
+                      readonly property var modelData: (root.costModelRows)[index] || ({})
+                      width: costModelChart.width
+                      height: Style.space(20)
+
+                      Rectangle {
+                        id: costModelDot
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Style.space(8)
+                        height: width
+                        radius: width / 2
+                        color: root.modelColor(costModelRow.modelData.model, costModelRow.index)
+                      }
+
+                      Text {
+                        text: usage.friendlyModelName(costModelRow.modelData.model)
+                        textFormat: Text.PlainText
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        elide: Text.ElideRight
+                        anchors.left: costModelDot.right
+                        anchors.leftMargin: Style.space(8)
+                        anchors.right: costModelShare.left
+                        anchors.rightMargin: Style.space(8)
+                        anchors.verticalCenter: parent.verticalCenter
+                      }
+
+                      Text {
+                        id: costModelShare
+                        text: Math.round(root.clamp(Number(costModelRow.modelData.share || 0), 0, 1) * 100) + "%"
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        anchors.right: costModelValue.left
+                        anchors.rightMargin: Style.space(10)
+                        anchors.verticalCenter: parent.verticalCenter
+                      }
+
+                      Text {
+                        id: costModelValue
+                        text: root.formatUsd(costModelRow.modelData.usd)
+                        textFormat: Text.PlainText
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            // How the providers with an estimate compare, biggest first;
+            // only worth a card when there are at least two.
+            BorderSurface {
+              id: costProviderOverview
+              readonly property var priced: root.costProviderRows.filter(function(r) { return r.hasCost })
+                .sort(function(a, b) { return b.estimateUsd - a.estimateUsd })
+              readonly property real totalUsd: {
+                var total = 0
+                for (var i = 0; i < priced.length; i++) total += Number(priced[i].estimateUsd) || 0
+                return total
+              }
+              // Periods are named per row only when they differ.
+              readonly property bool mixedPeriods: {
+                for (var i = 1; i < priced.length; i++)
+                  if (String(priced[i].period || "") !== String(priced[0].period || "")) return true
+                return false
+              }
+              visible: priced.length >= 2
+              width: parent.width
+              implicitHeight: providerOverviewContent.implicitHeight + Style.space(28)
+              color: root.alpha(root.foreground, 0.035)
+              borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+              radius: root.cardRadius
+
+              Column {
+                id: providerOverviewContent
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(14)
+                anchors.rightMargin: Style.space(14)
+                spacing: Style.space(10)
+
+                CardTitle {
+                  width: parent.width
+                  glyph: "󰀏"
+                  text: "Compared"
+                  note: root.formatUsd(costProviderOverview.totalUsd)
+                    + (costProviderOverview.mixedPeriods || costProviderOverview.priced.length === 0 ? ""
+                      : " · " + root.costPeriodLabel(costProviderOverview.priced[0].period))
+                }
+
+                Repeater {
+                  model: costProviderOverview.priced.length
+
+                  Item {
+                    id: providerCostRow
+                    required property int index
+                    readonly property var modelData: costProviderOverview.priced[index] || ({})
+                    readonly property bool current: !!root.provider && root.provider.providerId === modelData.providerId
+                    readonly property var live: root.providerById(modelData.providerId)
+                    width: providerOverviewContent.width
+                    implicitHeight: providerCostTop.height + Style.space(6) + providerShareTrack.height
+
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.selectedProviderId = providerCostRow.modelData.providerId
+                    }
+
+                    Item {
+                      id: providerCostTop
+                      width: parent.width
+                      height: Math.max(providerCostName.implicitHeight, Style.space(16))
+
+                      ProviderMark {
+                        id: providerCostMark
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Style.space(16)
+                        height: width
+                        provider: providerCostRow.live || providerCostRow.modelData
+                      }
+
+                      Text {
+                        id: providerCostName
+                        text: String(providerCostRow.modelData.providerName || "Provider")
+                        textFormat: Text.PlainText
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        font.bold: providerCostRow.current
+                        elide: Text.ElideRight
+                        anchors.left: providerCostMark.right
+                        anchors.leftMargin: Style.space(8)
+                        anchors.right: providerCostKind.left
+                        anchors.rightMargin: Style.space(8)
+                        anchors.verticalCenter: parent.verticalCenter
+                      }
+
+                      Text {
+                        id: providerCostKind
+                        text: (providerCostRow.modelData.incomplete ? "partial" : "")
+                          + (providerCostRow.modelData.incomplete && costProviderOverview.mixedPeriods ? " · " : "")
+                          + (costProviderOverview.mixedPeriods ? root.costPeriodLabel(providerCostRow.modelData.period) : "")
+                        textFormat: Text.PlainText
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        anchors.right: providerCostApiValue.left
+                        anchors.rightMargin: Style.space(10)
+                        anchors.verticalCenter: parent.verticalCenter
+                      }
+
+                      Text {
+                        id: providerCostApiValue
+                        text: root.formatUsd(providerCostRow.modelData.estimateUsd)
+                        textFormat: Text.PlainText
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        font.bold: true
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                      }
+                    }
+
+                    // Share of the combined estimate; the selected provider
+                    // in full accent.
+                    Rectangle {
+                      id: providerShareTrack
+                      anchors.left: parent.left
+                      anchors.leftMargin: providerCostName.x
+                      anchors.right: parent.right
+                      anchors.bottom: parent.bottom
+                      height: Style.space(4)
+                      radius: height / 2
+                      color: root.track
+
+                      Rectangle {
+                        width: parent.width * root.clamp(Number(providerCostRow.modelData.share || 0), 0, 1)
+                        height: parent.height
+                        radius: height / 2
+                        color: providerCostRow.current ? Commons.Color.accent : root.alpha(Commons.Color.accent, 0.45)
+
+                        Behavior on width {
+                          NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
             }
           }
 
@@ -3092,166 +4006,704 @@ Panel {
           // editable here without a terminal (issue 08). Gated by its own
           // `settingsOpen` flag (not `expanded`) so opening settings doesn't
           // also force the cross-provider data section into view — the two
-          // are mutually exclusive, see toggleSettings(). The settings
-          // themselves are obviously not session-only — every control
-          // writes through to shell.json.
-          PanelSeparator {
-            visible: root.settingsOpen
-            foreground: root.foreground
-          }
-
+          // are mutually exclusive, see toggleSettings(). Every control writes
+          // through usage.set*() in Main.qml; numeric fields go through the
+          // `settingsDraft` object and the pinned save bar.
           Column {
             id: settingsSection
             visible: root.settingsOpen
             width: parent.width
-            spacing: Style.spacing.lg
+            spacing: Style.space(14)
 
             // Discard any unsaved draft the moment settings are reopened,
             // rather than resuming an edit from a previous visit — resyncing
             // only here (never on a live settings change) is what keeps a
             // draft immune to being clobbered while the panel is open.
-            onVisibleChanged: if (visible) behaviourContent.resyncDrafts()
-
-            PanelSectionHeader {
-              width: parent.width
-              text: "SETTINGS"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
+            onVisibleChanged: if (visible) {
+              settingsDraft.resyncDrafts()
+              syncContent.resyncDraft()
             }
 
-            BorderSurface {
-              id: accountSettings
+            // ----- Section tabs -----
+            TabStrip {
+              id: settingsTabs
               width: parent.width
-              implicitHeight: accountSettingsContent.implicitHeight + Style.space(28)
-              color: root.alpha(root.foreground, 0.035)
-              borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-              radius: Style.cornerRadius
+              tabs: [
+                { id: "providers", label: "Providers", glyph: "󰨝" },
+                { id: "accounts", label: "Accounts", glyph: "󰀏" },
+                { id: "display", label: "Display", glyph: "󰸌" },
+                { id: "alerts", label: "Alerts", glyph: "󰂜" },
+                { id: "sync", label: "Sync", glyph: "󰓦" }
+              ]
+              current: root.settingsTab
+              // A dot on a tab that holds unsaved edits, so a draft left on
+              // another tab is never invisible.
+              badges: ({
+                providers: settingsDraft.rotationDirty,
+                display: settingsDraft.refreshDirty,
+                alerts: settingsDraft.thresholdsDirty,
+                sync: syncContent.syncDirDirty
+              })
+              onPicked: function(id) {
+                root.settingsTab = id
+                if (panelFlick) panelFlick.contentY = 0
+              }
+            }
 
-              Column {
-                id: accountSettingsContent
-                anchors.fill: parent
-                anchors.margins: Style.space(14)
-                spacing: Style.space(10)
-                property string newProvider: "codex"
-                function addNewAccount() {
-                  if (usage.addAccount(newProvider, accountNameInput.text)) accountNameInput.text = ""
+            // =========================================== Providers tab
+            Column {
+              id: providerSettingsList
+              visible: root.settingsTab === "providers"
+              width: parent.width
+              spacing: Style.space(10)
+
+              readonly property var barRoleOptions: [
+                { value: "off", label: "Off", tip: "Not shown in the bar" },
+                { value: "fixed", label: "Fixed", tip: "Always shown in the bar" },
+                { value: "cycle", label: "Cycle", tip: "Rotates through the bar's Cycle slots" }
+              ]
+              readonly property var labelModeOptions: [
+                { value: "icon", label: "Icon", tip: "Just the mark" },
+                { value: "iconPercent", label: "Icon %", tip: "Mark and the percent" },
+                { value: "full", label: "Full", tip: "Mark, meter and percent" }
+              ]
+
+              Text {
+                width: parent.width
+                text: "Choose which subscriptions are collected and how each one sits in the bar. To change their order, drag the provider marks in the usage view."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+                lineHeight: 1.15
+              }
+
+              Repeater {
+                // Indexed, so a refresh updates rows in place instead of
+                // rebuilding them (rebuilt rows re-animated and re-laid out).
+                model: (root.settingsProviders).length
+
+                BorderSurface {
+                  id: providerSettingsRow
+                  readonly property var modelData: (root.settingsProviders)[index] || ({})
+                  required property int index
+                  readonly property var liveProvider: root.providerById(modelData.providerId)
+                  readonly property bool inBar: modelData.enabled && modelData.barRole !== "off"
+                  width: providerSettingsList.width
+                  implicitHeight: providerCardContent.implicitHeight + Style.space(24)
+                  color: root.alpha(root.foreground, modelData.enabled ? 0.045 : 0.02)
+                  borderSpec: Border.flat(root.alpha(modelData.enabled ? Commons.Color.accent : root.foreground,
+                    modelData.enabled ? 0.22 : 0.10), 1)
+                  radius: root.cardRadius
+
+                  Column {
+                    id: providerCardContent
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: Style.space(12)
+                    anchors.rightMargin: Style.space(12)
+                    spacing: Style.space(12)
+
+                    Item {
+                      width: parent.width
+                      implicitHeight: Math.max(Style.space(34), providerHeading.implicitHeight)
+
+                      Rectangle {
+                        id: providerMarkTile
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: Style.space(34)
+                        height: width
+                        radius: root.controlRadius
+                        color: root.alpha(root.foreground, 0.06)
+                        opacity: providerSettingsRow.modelData.enabled ? 1.0 : 0.5
+
+                        ProviderMark {
+                          anchors.centerIn: parent
+                          width: Style.space(20)
+                          height: width
+                          provider: providerSettingsRow.modelData
+                        }
+                      }
+
+                      Column {
+                        id: providerHeading
+                        anchors.left: providerMarkTile.right
+                        anchors.leftMargin: Style.space(10)
+                        anchors.right: barPreviewStrip.visible ? barPreviewStrip.left : providerToggle.left
+                        anchors.rightMargin: Style.space(8)
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Style.space(2)
+
+                        Text {
+                          width: parent.width
+                          text: providerSettingsRow.modelData.providerName
+                          textFormat: Text.PlainText
+                          color: providerSettingsRow.modelData.enabled ? root.foreground : root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.body
+                          font.bold: true
+                          elide: Text.ElideRight
+                        }
+
+                        Text {
+                          width: parent.width
+                          text: root.providerSettingsSummary(providerSettingsRow.modelData, providerSettingsRow.liveProvider)
+                          textFormat: Text.PlainText
+                          color: providerSettingsRow.modelData.enabled && providerSettingsRow.liveProvider
+                            && String(providerSettingsRow.liveProvider.usageStatusText || "") !== ""
+                            ? root.textFor(root.statusColor(providerSettingsRow.liveProvider)) : root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                          elide: Text.ElideRight
+                        }
+                      }
+
+                      // What the bar will draw for this provider, built from
+                      // the same parts as the real bar group.
+                      Rectangle {
+                        id: barPreviewStrip
+                        visible: providerSettingsRow.inBar
+                        anchors.right: providerToggle.left
+                        anchors.rightMargin: Style.space(10)
+                        anchors.verticalCenter: parent.verticalCenter
+                        height: Style.space(24)
+                        width: barPreviewRow.implicitWidth + Style.space(16)
+                        radius: root.controlRadius
+                        color: Commons.Color.bar.background
+                        border.width: 1
+                        border.color: root.alpha(root.foreground, 0.14)
+
+                        Row {
+                          id: barPreviewRow
+                          anchors.centerIn: parent
+                          spacing: Style.space(5)
+                          readonly property string mode: providerSettingsRow.modelData.labelMode
+                          readonly property var previewProvider: providerSettingsRow.liveProvider || providerSettingsRow.modelData
+
+                          ProviderMark {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: Style.space(16)
+                            height: width
+                            provider: barPreviewRow.previewProvider
+                            barMark: true
+                          }
+
+                          CheckpointMeter {
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: Style.space(48)
+                            visible: barPreviewRow.mode === "full" && root.providerPercent(barPreviewRow.previewProvider) >= 0
+                            value: {
+                              var percent = root.providerPercent(barPreviewRow.previewProvider)
+                              return percent >= 0 ? root.displayPercent(percent) : -1
+                            }
+                            secondaryValue: {
+                              var percent = root.providerSecondaryPercent(barPreviewRow.previewProvider)
+                              return percent >= 0 ? root.displayPercent(percent) : -1
+                            }
+                            severity: root.providerWorstSeverity(barPreviewRow.previewProvider)
+                          }
+
+                          Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: barPreviewRow.mode !== "icon"
+                            text: root.providerPercentText(barPreviewRow.previewProvider)
+                            color: root.colorForSeverity(root.providerWorstSeverity(barPreviewRow.previewProvider))
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.caption
+                          }
+                        }
+                      }
+
+                      ToggleSwitch {
+
+                        rounded: true
+                        id: providerToggle
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        checked: providerSettingsRow.modelData.enabled
+                        foreground: root.foreground
+                        accent: Commons.Color.accent
+                        onToggled: usage.setProviderEnabled(providerSettingsRow.modelData.providerId, !providerSettingsRow.modelData.enabled)
+                      }
+                    }
+
+                    // Bar placement only matters for a collected provider:
+                    // where it sits, and how much of it the bar draws.
+                    Row {
+                      visible: providerSettingsRow.modelData.enabled
+                      width: parent.width
+                      spacing: Style.space(10)
+                      readonly property real half: (width - spacing) / 2
+
+                      Column {
+                        width: parent.half
+                        spacing: Style.space(5)
+
+                        Text {
+                          text: "In the bar"
+                          color: root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                        }
+
+                        Segmented {
+                          width: parent.width
+                          options: providerSettingsList.barRoleOptions
+                          current: providerSettingsRow.modelData.barRole
+                          onPicked: function(value) { usage.setProviderBarRole(providerSettingsRow.modelData.providerId, value) }
+                        }
+                      }
+
+                      Column {
+                        width: parent.half
+                        spacing: Style.space(5)
+                        enabled: providerSettingsRow.inBar
+                        opacity: enabled ? 1.0 : 0.45
+
+                        Text {
+                          text: "Shows"
+                          color: root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                        }
+
+                        Segmented {
+                          width: parent.width
+                          options: providerSettingsList.labelModeOptions
+                          current: providerSettingsRow.modelData.labelMode
+                          onPicked: function(value) { usage.setProviderLabelMode(providerSettingsRow.modelData.providerId, value) }
+                        }
+                      }
+                    }
+                  }
                 }
+              }
+
+              BorderSurface {
+                visible: root.settingsProviders.length === 0
+                width: parent.width
+                implicitHeight: noProvidersText.implicitHeight + Style.space(28)
+                color: root.alpha(root.foreground, 0.035)
+                borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+                radius: root.cardRadius
 
                 Text {
-                  text: "Accounts"
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  font.bold: true
-                }
-
-                Text {
-                  width: parent.width
-                  text: "Import existing CLI accounts from one or more paths, or create a new account below. Each account keeps its own login and limits."
+                  id: noProvidersText
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.margins: Style.space(14)
+                  text: "No subscriptions discovered yet. Use Claude Code or Codex once, or install the optional collectors for other providers — they show up here on the next refresh."
                   color: root.dim
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
+                  font.pixelSize: Style.font.bodySmall
                   wrapMode: Text.WordWrap
                 }
+              }
 
-                Row {
+
+              // ----- Rotation -----
+              BorderSurface {
+                width: parent.width
+                implicitHeight: rotationContent.implicitHeight + Style.space(28)
+                color: root.alpha(root.foreground, 0.035)
+                borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+                radius: root.cardRadius
+
+                Column {
+                  id: rotationContent
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(14)
+                  anchors.rightMargin: Style.space(14)
+                  spacing: Style.space(10)
+
+                  CardTitle {
+                    width: parent.width
+                    glyph: "󰑧"
+                    text: "Bar rotation"
+                    note: root.hasCycleSlotConfigured() ? "" : "no Cycle providers"
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: root.hasCycleSlotConfigured()
+                      ? "Providers set to Cycle take turns in these slots, next to the Fixed ones. Middle-click the bar to advance."
+                      : "Set a provider's Bar slot to Cycle to rotate it through the bar instead of showing it all the time."
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
+
+                  Row {
+                    width: parent.width
+                    spacing: Style.space(12)
+                    // Disabled rather than hidden when unused, so the card's
+                    // shape never changes as providers switch bar roles.
+                    enabled: root.hasCycleSlotConfigured()
+                    opacity: enabled ? 1.0 : 0.5
+
+                    NumberField {
+                      width: (parent.width - parent.spacing) / 2
+                      fieldWidth: width
+                      label: "Cycle slots"
+                      value: settingsDraft.cycleSlots
+                      from: 0
+                      to: 3
+                      stepSize: 1
+                      foreground: root.foreground
+                      accent: Commons.Color.accent
+                      fontFamily: root.fontFamily
+                      onModified: function(v) { settingsDraft.cycleSlots = v }
+                    }
+
+                    NumberField {
+                      width: (parent.width - parent.spacing) / 2
+                      fieldWidth: width
+                      label: "Rotate every (s)"
+                      value: settingsDraft.cycleIntervalSec
+                      from: 3
+                      to: 120
+                      stepSize: 1
+                      foreground: root.foreground
+                      accent: Commons.Color.accent
+                      fontFamily: root.fontFamily
+                      onModified: function(v) { settingsDraft.cycleIntervalSec = v }
+                    }
+                  }
+                }
+              }
+            }
+
+            // ============================================ Accounts tab
+            // Several Claude or Codex logins side by side. The list comes
+            // first (what exists and which one the bar uses), then the two
+            // ways to add one: a fresh login, or importing existing CLI homes.
+            Column {
+              id: accountSettingsContent
+              visible: root.settingsTab === "accounts"
+              width: parent.width
+              spacing: Style.space(10)
+
+              property string newProvider: "claude"
+              readonly property string providerLabel: newProvider === "claude" ? "Claude" : "Codex"
+              readonly property var accounts: {
+                var profiles = usage.accountProfiles
+                return Object.keys(profiles).sort().filter(function(id) { return profiles[id].provider === accountSettingsContent.newProvider })
+              }
+              function addNewAccount() {
+                if (usage.addAccount(newProvider, accountNameInput.text)) accountNameInput.text = ""
+              }
+
+              Text {
+                width: parent.width
+                text: "Track several Claude or Codex logins side by side. The active account is the one the bar shows and right-click launches; changes apply immediately."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+                lineHeight: 1.15
+              }
+
+              Segmented {
+                width: parent.width
+                options: [{ value: "claude", label: "Claude" }, { value: "codex", label: "Codex" }]
+                current: accountSettingsContent.newProvider
+                onPicked: function(value) { accountSettingsContent.newProvider = value }
+              }
+
+              BorderSurface {
+                width: parent.width
+                implicitHeight: accountListContent.implicitHeight + Style.space(24)
+                color: root.alpha(root.foreground, 0.035)
+                borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+                radius: root.cardRadius
+
+                Column {
+                  id: accountListContent
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(12)
+                  anchors.rightMargin: Style.space(12)
                   spacing: Style.space(6)
 
+                  CardTitle {
+                    width: parent.width
+                    glyph: "󰀏"
+                    text: accountSettingsContent.providerLabel + " accounts"
+                    note: (accountSettingsContent.accounts.length + 1) + " total"
+                  }
+
                   Repeater {
-                    model: ["claude", "codex"]
-                    Button {
+                    model: [accountSettingsContent.newProvider].concat(accountSettingsContent.accounts)
+
+                    Rectangle {
+                      id: configuredAccountRow
                       required property string modelData
-                      text: modelData === "claude" ? "Claude" : "Codex"
-                      selected: accountSettingsContent.newProvider === modelData
+                      readonly property var profile: usage.accountProfiles[modelData]
+                      readonly property bool ready: !profile || root.accountRecordExists(modelData)
+                      readonly property var live: root.providerById(modelData)
+                      readonly property bool active: usage.activeAccountId(accountSettingsContent.newProvider) === modelData
+                      width: accountListContent.width
+                      height: Math.max(accountRowText.implicitHeight, accountActions.implicitHeight) + Style.space(14)
+                      radius: root.controlRadius
+                      color: active ? root.alpha(Commons.Color.accent, 0.10) : root.alpha(root.foreground, 0.03)
+                      border.width: 1
+                      border.color: active ? root.alpha(Commons.Color.accent, 0.35) : root.alpha(root.foreground, 0.08)
+
+                      Column {
+                        id: accountRowText
+                        anchors.left: parent.left
+                        anchors.leftMargin: Style.space(10)
+                        anchors.right: accountActions.left
+                        anchors.rightMargin: Style.space(8)
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Style.space(2)
+
+                        Text {
+                          width: parent.width
+                          text: configuredAccountRow.profile ? configuredAccountRow.profile.name : "Default login"
+                          textFormat: Text.PlainText
+                          color: root.foreground
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.bodySmall
+                          font.bold: true
+                          elide: Text.ElideRight
+                        }
+
+                        // Its live state when it has a record, then where it
+                        // lives on disk.
+                        Text {
+                          width: parent.width
+                          text: {
+                            var live = configuredAccountRow.live
+                            if (!configuredAccountRow.ready) return "Preparing its record…"
+                            if (live && String(live.usageStatusText || "") !== "") return String(live.usageStatusText)
+                            if (live && root.providerPercent(live) >= 0) return root.providerPercentText(live) + " used"
+                              + (live.tierLabel ? " · " + live.tierLabel : "")
+                            return configuredAccountRow.profile ? "Waiting for its first reading" : "The login the CLI uses by default"
+                          }
+                          textFormat: Text.PlainText
+                          color: configuredAccountRow.live && String(configuredAccountRow.live.usageStatusText || "") !== ""
+                            ? root.textFor(root.statusColor(configuredAccountRow.live)) : root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                          elide: Text.ElideRight
+                        }
+
+                        Text {
+                          visible: text !== ""
+                          width: parent.width
+                          text: configuredAccountRow.profile ? (configuredAccountRow.profile.path || "") : ""
+                          textFormat: Text.PlainText
+                          color: root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                          elide: Text.ElideMiddle
+                        }
+                      }
+
+                      Row {
+                        id: accountActions
+                        anchors.right: parent.right
+                        anchors.rightMargin: Style.space(8)
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Style.space(6)
+
+                        Button {
+
+                          radius: root.controlRadius
+                          id: loginButton
+                          visible: !!configuredAccountRow.profile
+                          text: enabled ? "Sign in" : "Preparing…"
+                          tooltipText: "Open the provider's own browser login for this account"
+                          enabled: configuredAccountRow.ready
+                          bordered: true
+                          foreground: root.foreground
+                          fontFamily: root.fontFamily
+                          fontSize: Style.font.caption
+                          onClicked: root.loginToAccount(configuredAccountRow.modelData)
+                        }
+
+                        LaunchAccountButton {
+
+                          radius: root.controlRadius
+                          id: launchAccountButton
+                          providerBrand: accountSettingsContent.newProvider
+                          accountId: configuredAccountRow.modelData
+                          enabled: configuredAccountRow.ready
+                        }
+
+                        Button {
+
+                          radius: root.controlRadius
+                          id: removeButton
+                          visible: !!configuredAccountRow.profile
+                          width: Style.space(28)
+                          horizontalPadding: 0
+                          iconText: "󰩺"
+                          iconSize: Style.font.body
+                          tooltipText: "Remove from the widget; the CLI login directory stays on disk"
+                          bordered: true
+                          foreground: root.foreground
+                          fontFamily: root.fontFamily
+                          onClicked: usage.removeAccount(configuredAccountRow.modelData)
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+
+              BorderSurface {
+                width: parent.width
+                implicitHeight: addAccountContent.implicitHeight + Style.space(28)
+                color: root.alpha(root.foreground, 0.035)
+                borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+                radius: root.cardRadius
+
+                Column {
+                  id: addAccountContent
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(14)
+                  anchors.rightMargin: Style.space(14)
+                  spacing: Style.space(10)
+
+                  CardTitle {
+                    width: parent.width
+                    glyph: "󰐙"
+                    text: "New login"
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: "Name it, add it, then use Sign in on its row. It gets its own CLI home, so it never touches the default login."
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
+
+                  Row {
+                    width: parent.width
+                    spacing: Style.space(8)
+
+                    Rectangle {
+                      width: parent.width - addAccountButton.width - parent.spacing
+                      height: Style.space(32)
+                      radius: root.controlRadius
+                      color: root.alpha(root.foreground, 0.06)
+                      border.width: 1
+                      border.color: accountNameInput.activeFocus ? Commons.Color.accent : root.alpha(root.foreground, 0.2)
+
+                      TextInput {
+                        id: accountNameInput
+                        anchors.fill: parent
+                        anchors.leftMargin: Style.space(10)
+                        anchors.rightMargin: Style.space(10)
+                        verticalAlignment: TextInput.AlignVCenter
+                        clip: true
+                        color: root.foreground
+                        selectionColor: root.alpha(Commons.Color.accent, 0.4)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        maximumLength: 80
+                        onAccepted: accountSettingsContent.addNewAccount()
+
+                        Text {
+                          visible: accountNameInput.text === "" && !accountNameInput.activeFocus
+                          anchors.verticalCenter: parent.verticalCenter
+                          text: accountSettingsContent.providerLabel + " account name, e.g. Work"
+                          color: root.dim
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.bodySmall
+                        }
+                      }
+                    }
+
+                    Button {
+
+                      radius: root.controlRadius
+                      id: addAccountButton
+                      height: Style.space(32)
+                      text: "Add"
+                      enabled: accountNameInput.text.trim().length > 0
+                      selected: enabled
                       bordered: true
                       foreground: root.foreground
                       fontFamily: root.fontFamily
-                      fontSize: Style.font.caption
-                      onClicked: accountSettingsContent.newProvider = modelData
+                      fontSize: Style.font.bodySmall
+                      horizontalPadding: Style.space(14)
+                      onClicked: accountSettingsContent.addNewAccount()
                     }
                   }
                 }
+              }
 
-                Rectangle {
-                  width: parent.width
-                  height: Style.space(78)
-                  radius: Style.cornerRadius
-                  color: root.alpha(root.foreground, 0.06)
-                  border.width: 1
-                  border.color: root.alpha(root.foreground, accountPathsInput.activeFocus ? 0.4 : 0.2)
+              BorderSurface {
+                width: parent.width
+                implicitHeight: importAccountContent.implicitHeight + Style.space(28)
+                color: root.alpha(root.foreground, 0.035)
+                borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+                radius: root.cardRadius
 
-                  TextEdit {
-                    id: accountPathsInput
-                    anchors.fill: parent
-                    anchors.margins: Style.space(8)
-                    clip: true
-                    color: root.foreground
+                Column {
+                  id: importAccountContent
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(14)
+                  anchors.rightMargin: Style.space(14)
+                  spacing: Style.space(10)
+
+                  CardTitle {
+                    width: parent.width
+                    glyph: "󱃩"
+                    text: "Import existing logins"
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: "One CLI home per line (~/ works). A parent folder imports each account inside it. Only filenames are inspected; nothing is copied."
+                    color: root.dim
                     font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    textFormat: TextEdit.PlainText
-                    wrapMode: TextEdit.WrapAnywhere
-                    selectByMouse: true
-
-                    Text {
-                      visible: accountPathsInput.text === "" && !accountPathsInput.activeFocus
-                      text: "Existing account paths, one per line\nExample: ~/.codex-t3/ (imports its accounts)"
-                      color: root.dim
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                    }
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
                   }
-                }
-
-                Button {
-                  text: usage.accountImportRunning ? "Importing…" : "Import paths"
-                  enabled: accountPathsInput.text.trim().length > 0 && !usage.accountImportRunning
-                  bordered: true
-                  foreground: root.foreground
-                  fontFamily: root.fontFamily
-                  fontSize: Style.font.caption
-                  onClicked: usage.importAccounts(accountSettingsContent.newProvider, accountPathsInput.text)
-                }
-
-                Text {
-                  width: parent.width
-                  visible: usage.accountImportStatus !== ""
-                  text: usage.accountImportStatus
-                  textFormat: Text.PlainText
-                  wrapMode: Text.WordWrap
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-
-                Row {
-                  width: parent.width
-                  spacing: Style.space(8)
 
                   Rectangle {
-                    width: parent.width - addAccountButton.width - parent.spacing
-                    height: Style.space(32)
-                    radius: Style.cornerRadius
+                    width: parent.width
+                    height: Style.space(72)
+                    radius: root.controlRadius
                     color: root.alpha(root.foreground, 0.06)
                     border.width: 1
-                    border.color: root.alpha(root.foreground, accountNameInput.activeFocus ? 0.4 : 0.2)
+                    border.color: accountPathsInput.activeFocus ? Commons.Color.accent : root.alpha(root.foreground, 0.2)
 
-                    TextInput {
-                      id: accountNameInput
+                    TextEdit {
+                      id: accountPathsInput
                       anchors.fill: parent
-                      anchors.leftMargin: Style.space(8)
-                      anchors.rightMargin: Style.space(8)
-                      verticalAlignment: TextInput.AlignVCenter
+                      anchors.margins: Style.space(10)
                       clip: true
                       color: root.foreground
+                      selectionColor: root.alpha(Commons.Color.accent, 0.4)
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.bodySmall
-                      maximumLength: 80
-                      onAccepted: accountSettingsContent.addNewAccount()
+                      textFormat: TextEdit.PlainText
+                      wrapMode: TextEdit.WrapAnywhere
+                      selectByMouse: true
 
                       Text {
-                        visible: accountNameInput.text === "" && !accountNameInput.activeFocus
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: "Account name, e.g. Work"
+                        visible: accountPathsInput.text === "" && !accountPathsInput.activeFocus
+                        width: parent.width
+                        text: accountSettingsContent.newProvider === "claude" ? "~/.claude-work\n~/.claude-accounts/" : "~/.codex-work\n~/.codex-accounts/"
+                        wrapMode: Text.WordWrap
                         color: root.dim
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.bodySmall
@@ -3259,617 +4711,381 @@ Panel {
                     }
                   }
 
-                  Button {
-                    id: addAccountButton
-                    text: "Add"
-                    enabled: accountNameInput.text.trim().length > 0
-                    selected: enabled
-                    bordered: true
-                    foreground: root.foreground
-                    fontFamily: root.fontFamily
-                    fontSize: Style.font.caption
-                    onClicked: accountSettingsContent.addNewAccount()
-                  }
-                }
-
-                Repeater {
-                  model: root.configuredAccounts
-
                   Row {
-                    id: configuredAccountRow
-                    required property var modelData
-                    width: accountSettingsContent.width
-                    spacing: Style.space(8)
+                    width: parent.width
+                    spacing: Style.space(10)
 
-                    Text {
-                      width: parent.width - loginButton.width - removeButton.width - Style.space(16)
+                    Button {
+
+                      radius: root.controlRadius
+                      id: importAccountsButton
                       anchors.verticalCenter: parent.verticalCenter
-                      text: configuredAccountRow.modelData.name + (configuredAccountRow.modelData.path ? "\n" + configuredAccountRow.modelData.path : "")
-                      textFormat: Text.PlainText
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                      elide: Text.ElideRight
-                    }
-
-                    Button {
-                      id: loginButton
-                      text: enabled ? "Sign in" : "Preparing…"
-                      enabled: root.accountRecordExists(configuredAccountRow.modelData.id)
+                      text: usage.accountImportRunning ? "Importing…" : "Import"
+                      enabled: accountPathsInput.text.trim().length > 0 && !usage.accountImportRunning
+                      selected: enabled
                       bordered: true
                       foreground: root.foreground
                       fontFamily: root.fontFamily
-                      fontSize: Style.font.caption
-                      onClicked: root.loginToAccount(configuredAccountRow.modelData.id)
+                      fontSize: Style.font.bodySmall
+                      horizontalPadding: Style.space(14)
+                      onClicked: usage.importAccounts(accountSettingsContent.newProvider, accountPathsInput.text)
                     }
-
-                    Button {
-                      id: removeButton
-                      text: "Remove"
-                      tooltipText: "Remove from the widget; keep the CLI login directory"
-                      bordered: true
-                      foreground: root.foreground
-                      fontFamily: root.fontFamily
-                      fontSize: Style.font.caption
-                      onClicked: usage.removeAccount(configuredAccountRow.modelData.id)
-                    }
-                  }
-                }
-              }
-            }
-
-            // ----- Per-provider controls -----
-            // A single compact row per provider keeps the list scannable even
-            // when several collectors are installed. The switches stay in a
-            // fixed column so the eye can compare providers without hunting
-            // through cards or provider-specific prose.
-            Column {
-              id: providerSettingsList
-              width: parent.width
-              spacing: Style.space(8)
-              readonly property real contentWidth: width - Style.space(28)
-              readonly property real providerColumnWidth: Math.min(300, Math.max(210, contentWidth * 0.36))
-              readonly property real controlColumnWidth: contentWidth - providerColumnWidth - Style.space(18)
-              readonly property real controlCellWidth: (controlColumnWidth - Style.space(24) * 2) / 3
-              readonly property var barRoleOptions: ["off", "fixed", "cycle"]
-              readonly property var barRoleLabels: ({ off: "Off", fixed: "Fixed", cycle: "Cycle" })
-              readonly property real barRoleButtonWidth: Math.max(Style.space(38),
-                (controlCellWidth - Style.space(8)) / barRoleOptions.length)
-              readonly property var labelModeOptions: ["icon", "iconPercent", "full"]
-              readonly property var labelModeLabels: ({ icon: "Icon", iconPercent: "Icon+%", full: "Full" })
-              readonly property real labelModeButtonWidth: Math.max(Style.space(38),
-                (controlCellWidth - Style.space(8)) / labelModeOptions.length)
-
-              Row {
-                x: Style.space(14)
-                width: parent.width - Style.space(28)
-                height: Style.space(22)
-                spacing: Style.space(18)
-
-                Item { width: providerSettingsList.providerColumnWidth; height: parent.height }
-
-                Repeater {
-                  model: ["Enabled", "Bar slot", "Bar shows"]
-
-                  Item {
-                    required property string modelData
-                    width: providerSettingsList.controlCellWidth
-                    height: parent.height
 
                     Text {
-                      anchors.centerIn: parent
-                      text: modelData
+                      anchors.verticalCenter: parent.verticalCenter
+                      width: parent.width - importAccountsButton.width - parent.spacing
+                      visible: usage.accountImportStatus !== ""
+                      text: usage.accountImportStatus
+                      textFormat: Text.PlainText
+                      wrapMode: Text.WordWrap
                       color: root.dim
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
-                      font.bold: true
-                    }
-                  }
-                }
-              }
-
-              Repeater {
-                model: root.settingsProviders
-
-                Rectangle {
-                  id: providerSettingsRow
-                  required property var modelData
-                  width: providerSettingsList.width
-                  height: Style.space(62)
-                  color: root.alpha(root.foreground, 0.035)
-                  border.width: 1
-                  border.color: root.alpha(root.foreground, 0.12)
-                  radius: Style.cornerRadius
-
-                  Row {
-                    anchors.fill: parent
-                    anchors.leftMargin: Style.space(14)
-                    anchors.rightMargin: Style.space(14)
-                    spacing: Style.space(18)
-
-                    Item {
-                      width: providerSettingsList.providerColumnWidth
-                      height: parent.height
-
-                      Row {
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        spacing: Style.space(10)
-
-                        ProviderMark {
-                          width: Style.space(24)
-                          height: Style.space(24)
-                          provider: providerSettingsRow.modelData
-                        }
-
-                        Text {
-                          width: parent.width - Style.space(34)
-                          text: providerSettingsRow.modelData.providerName
-                          color: root.foreground
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.bodySmall
-                          font.bold: true
-                          elide: Text.ElideRight
-                          anchors.verticalCenter: parent.verticalCenter
-                        }
-                      }
-                    }
-
-                    Item {
-                      width: providerSettingsList.controlColumnWidth
-                      height: parent.height
-
-                      Row {
-                        anchors.fill: parent
-                        spacing: Style.space(24)
-
-                        Item {
-                          width: providerSettingsList.controlCellWidth
-                          height: parent.height
-
-                          ToggleSwitch {
-                            anchors.centerIn: parent
-                            checked: providerSettingsRow.modelData.enabled
-                            foreground: root.foreground
-                            accent: Color.accent
-                            onToggled: usage.setProviderEnabled(providerSettingsRow.modelData.providerId, !providerSettingsRow.modelData.enabled)
-                          }
-                        }
-
-                        Item {
-                          width: providerSettingsList.controlCellWidth
-                          height: parent.height
-                          // Fixed/Cycle also enables the provider. Keep this
-                          // selector clickable even while its Enabled switch
-                          // is off, otherwise it cannot perform that action.
-                          opacity: providerSettingsRow.modelData.enabled ? 1.0 : 0.62
-
-                          Row {
-                            anchors.centerIn: parent
-                            spacing: Style.space(4)
-
-                            Repeater {
-                              model: providerSettingsList.barRoleOptions
-
-                              Button {
-                                required property string modelData
-                                width: providerSettingsList.barRoleButtonWidth
-                                text: providerSettingsList.barRoleLabels[modelData]
-                                tooltipText: modelData === "off" ? "Not shown in the bar"
-                                  : modelData === "fixed" ? "Always shown in the bar"
-                                  : "Rotates through the bar's Cycle slots"
-                                selected: providerSettingsRow.modelData.barRole === modelData
-                                bordered: true
-                                foreground: root.foreground
-                                fontFamily: root.fontFamily
-                                fontSize: Style.font.caption
-                                verticalPadding: Style.space(4)
-                                onClicked: usage.setProviderBarRole(
-                                  providerSettingsRow.modelData.providerId, modelData)
-                              }
-                            }
-                          }
-                        }
-
-                        Item {
-                          width: providerSettingsList.controlCellWidth
-                          height: parent.height
-                          // Only matters once this provider actually has a
-                          // bar slot — same dimming rule as Bar slot's own
-                          // buttons above, just gated on the role instead of
-                          // Enabled, since a Fixed/Cycle role is what makes
-                          // this provider's own bar mark exist at all.
-                          opacity: providerSettingsRow.modelData.barRole === "off" ? 0.5 : 1.0
-
-                          Row {
-                            anchors.centerIn: parent
-                            spacing: Style.space(4)
-
-                            Repeater {
-                              model: providerSettingsList.labelModeOptions
-
-                              Button {
-                                required property string modelData
-                                width: providerSettingsList.labelModeButtonWidth
-                                text: providerSettingsList.labelModeLabels[modelData]
-                                tooltipText: modelData === "icon" ? "Just the mark"
-                                  : modelData === "iconPercent" ? "Mark and the percent"
-                                  : "Mark, percent, and the meter"
-                                selected: providerSettingsRow.modelData.labelMode === modelData
-                                bordered: true
-                                foreground: root.foreground
-                                fontFamily: root.fontFamily
-                                fontSize: Style.font.caption
-                                verticalPadding: Style.space(4)
-                                onClicked: usage.setProviderLabelMode(
-                                  providerSettingsRow.modelData.providerId, modelData)
-                              }
-                            }
-                          }
-                        }
-
-                      }
                     }
                   }
                 }
               }
             }
 
-            Text {
-              visible: root.settingsProviders.length === 0
+            // ============================================= Display tab
+            Column {
+              visible: root.settingsTab === "display"
               width: parent.width
-              text: "No subscriptions discovered yet."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-            }
+              spacing: Style.space(10)
 
-            BorderSurface {
-              id: behaviourSection
-              width: parent.width
-              implicitHeight: behaviourContent.implicitHeight + Style.space(28)
-              color: root.alpha(root.foreground, 0.035)
-              borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-              radius: Style.cornerRadius
+              BorderSurface {
+                width: parent.width
+                implicitHeight: displayContent.implicitHeight + Style.space(28)
+                color: root.alpha(root.foreground, 0.035)
+                borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+                radius: root.cardRadius
 
-              Column {
-                id: behaviourContent
-                anchors.fill: parent
-                anchors.margins: Style.space(14)
-                spacing: Style.space(10)
+                Column {
+                  id: displayContent
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(14)
+                  anchors.rightMargin: Style.space(14)
+                  spacing: Style.space(12)
 
-                // Draft copies of the numeric fields below, committed only on
-                // Save. Binding a SpinBox's `value` straight to a setting
-                // meant every settings write (even to an unrelated field, or
-                // the periodic refresh reloading `settings` wholesale) could
-                // reassert a stale number over whatever the person was still
-                // typing. Drafts only ever change from resyncDrafts() (on
-                // opening settings) or the fields' own onModified, so nothing
-                // else can clobber an in-progress edit.
-                property int draftCycleSlots: usage.barCycleSlots
-                property int draftCycleIntervalSec: usage.barCycleIntervalSec
-                property int draftRefreshIntervalSec: usage.refreshIntervalSec
-                property int draftWarnThresholdPct: root.displayWarnThresholdPct
-                property int draftCriticalThresholdPct: root.displayCriticalThresholdPct
-                property bool draftShowsAvailable: usage.showAvailablePercentage
+                  CardTitle {
+                    width: parent.width
+                    glyph: "󰛐"
+                    text: "Appearance"
+                  }
 
-                readonly property bool settingsDirty: draftCycleSlots !== usage.barCycleSlots
-                  || draftCycleIntervalSec !== usage.barCycleIntervalSec
-                  || draftRefreshIntervalSec !== usage.refreshIntervalSec
-                  || draftWarnThresholdPct !== root.displayWarnThresholdPct
-                  || draftCriticalThresholdPct !== root.displayCriticalThresholdPct
+                  SettingToggle {
+                    width: parent.width
+                    title: "Show available quota"
+                    description: "Percentages, meters and warning values count down what is left instead of up to what is used. Trigger points stay the same."
+                    checked: usage.showAvailablePercentage
+                    onToggled: usage.setShowAvailablePercentage(!usage.showAvailablePercentage)
+                  }
 
-                // In used terms Warn must be below Critical; complementing
-                // both values reverses that ordering in available terms.
-                // Catch either invalid form before Save, where the person
-                // editing the number can see why it is stuck.
-                readonly property bool draftThresholdsValid: draftShowsAvailable
-                  ? draftWarnThresholdPct > draftCriticalThresholdPct
-                  : draftWarnThresholdPct < draftCriticalThresholdPct
+                  SettingToggle {
+                    width: parent.width
+                    title: "Color-code meters"
+                    description: "Green, amber and red for Healthy, Warn and Critical. Off keeps meters in your theme's colors."
+                    checked: usage.colorfulUsageMeters
+                    onToggled: usage.setColorfulUsageMeters(!usage.colorfulUsageMeters)
+                  }
 
-                function resyncDrafts() {
-                  draftCycleSlots = usage.barCycleSlots
-                  draftCycleIntervalSec = usage.barCycleIntervalSec
-                  draftRefreshIntervalSec = usage.refreshIntervalSec
-                  draftWarnThresholdPct = root.displayWarnThresholdPct
-                  draftCriticalThresholdPct = root.displayCriticalThresholdPct
-                  draftShowsAvailable = usage.showAvailablePercentage
-                }
-
-                // Preserve every in-progress draft when the presentation mode
-                // changes. Only complement the two threshold fields in place;
-                // resyncDrafts() would incorrectly discard unrelated edits.
-                function syncPercentageMode() {
-                  if (draftShowsAvailable === usage.showAvailablePercentage) return
-                  draftWarnThresholdPct = 100 - draftWarnThresholdPct
-                  draftCriticalThresholdPct = 100 - draftCriticalThresholdPct
-                  draftShowsAvailable = usage.showAvailablePercentage
-                }
-
-                function saveDrafts() {
-                  usage.setBarCycleSlots(draftCycleSlots)
-                  usage.setBarCycleIntervalSec(draftCycleIntervalSec)
-                  usage.setRefreshIntervalSec(draftRefreshIntervalSec)
-                  usage.setWarnThresholdPct(draftShowsAvailable
-                    ? 100 - draftWarnThresholdPct : draftWarnThresholdPct)
-                  usage.setCriticalThresholdPct(draftShowsAvailable
-                    ? 100 - draftCriticalThresholdPct : draftCriticalThresholdPct)
-                }
-
-                Connections {
-                  target: usage
-                  function onShowAvailablePercentageChanged() {
-                    behaviourContent.syncPercentageMode()
+                  SettingToggle {
+                    width: parent.width
+                    title: "Open on Activity"
+                    description: "Start every opening on the Activity view (calendar and trend) instead of Usage."
+                    checked: usage.openInDetailedView
+                    onToggled: usage.setOpenInDetailedView(!usage.openInDetailedView)
                   }
                 }
+              }
 
-                Text {
-                  text: "Bar behaviour & limits"
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                }
+              BorderSurface {
+                width: parent.width
+                implicitHeight: refreshContent.implicitHeight + Style.space(28)
+                color: root.alpha(root.foreground, 0.035)
+                borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+                radius: root.cardRadius
 
-                Grid {
-                  id: behaviourGrid
-                  width: parent.width
-                  columns: 3
-                  columnSpacing: Style.space(10)
-                  rowSpacing: Style.space(10)
-                  readonly property real cellWidth: Math.floor((width - columnSpacing * (columns - 1)) / columns)
+                Column {
+                  id: refreshContent
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(14)
+                  anchors.rightMargin: Style.space(14)
+                  spacing: Style.space(10)
 
-                  NumberField {
-                    // Disabled rather than hidden when unused, so the grid's
-                    // shape never changes as providers switch bar roles —
-                    // see the hint text above for why.
-                    enabled: root.hasCycleSlotConfigured()
-                    opacity: enabled ? 1.0 : 0.5
-                    width: behaviourGrid.cellWidth
-                    label: "Cycle slots"
-                    value: behaviourContent.draftCycleSlots
-                    from: 0
-                    to: 3
-                    stepSize: 1
-                    foreground: root.foreground
-                    accent: Color.accent
-                    fontFamily: root.fontFamily
-                    onModified: function(v) { behaviourContent.draftCycleSlots = v }
+                  CardTitle {
+                    width: parent.width
+                    glyph: "󰅐"
+                    text: "Refresh"
+                    note: "every " + root.formatSeconds(settingsDraft.refreshIntervalSec)
                   }
 
                   NumberField {
-                    enabled: root.hasCycleSlotConfigured()
-                    opacity: enabled ? 1.0 : 0.5
-                    width: behaviourGrid.cellWidth
-                    label: "Rotate (s)"
-                    value: behaviourContent.draftCycleIntervalSec
-                    from: 3
-                    to: 120
-                    stepSize: 1
-                    foreground: root.foreground
-                    accent: Color.accent
-                    fontFamily: root.fontFamily
-                    onModified: function(v) { behaviourContent.draftCycleIntervalSec = v }
-                  }
-
-                  NumberField {
-                    width: behaviourGrid.cellWidth
-                    label: "Refresh (s)"
-                    value: behaviourContent.draftRefreshIntervalSec
+                    width: parent.width
+                    fieldWidth: width
+                    label: "Collect usage every (seconds)"
+                    value: settingsDraft.refreshIntervalSec
                     from: 30
                     to: 3600
                     stepSize: 30
                     foreground: root.foreground
-                    accent: Color.accent
+                    accent: Commons.Color.accent
                     fontFamily: root.fontFamily
-                    onModified: function(v) { behaviourContent.draftRefreshIntervalSec = v }
-                  }
-
-                  NumberField {
-                    width: behaviourGrid.cellWidth
-                    label: behaviourContent.draftShowsAvailable ? "Warn avail. (%)" : "Warn used (%)"
-                    value: behaviourContent.draftWarnThresholdPct
-                    from: 1
-                    to: 99
-                    stepSize: 1
-                    foreground: root.foreground
-                    accent: root.warn
-                    fontFamily: root.fontFamily
-                    onModified: function(v) { behaviourContent.draftWarnThresholdPct = v }
-                  }
-
-                  NumberField {
-                    width: behaviourGrid.cellWidth
-                    label: behaviourContent.draftShowsAvailable ? "Critical avail. (%)" : "Critical used (%)"
-                    value: behaviourContent.draftCriticalThresholdPct
-                    from: behaviourContent.draftShowsAvailable ? 0 : 1
-                    to: behaviourContent.draftShowsAvailable ? 99 : 100
-                    stepSize: 1
-                    foreground: root.foreground
-                    accent: root.urgent
-                    fontFamily: root.fontFamily
-                    onModified: function(v) { behaviourContent.draftCriticalThresholdPct = v }
-                  }
-                }
-
-                Text {
-                  width: parent.width
-                  // One fixed line, never appearing/disappearing: it swaps
-                  // between the normal hint and the validation error so nothing
-                  // below it jumps when Warn/Critical cross each other.
-                  text: behaviourContent.draftThresholdsValid
-                    ? (behaviourContent.draftShowsAvailable
-                      ? "Warn when available quota falls this low; Critical marks the lower urgent level. Type an exact value or use the arrows, then Save applies all five fields above together."
-                      : "Warn colors the meter early; Critical marks it urgent. Type an exact value or use the arrows, then Save applies all five fields above together.")
-                    : (behaviourContent.draftShowsAvailable
-                      ? "Warn availability must be higher than Critical — Save is disabled until that's fixed."
-                      : "Warn usage must be lower than Critical — Save is disabled until that's fixed.")
-                  color: behaviourContent.draftThresholdsValid ? root.dim : root.urgent
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
-                }
-
-                Row {
-                  spacing: Style.space(10)
-
-                  Button {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "Save"
-                    enabled: behaviourContent.settingsDirty && behaviourContent.draftThresholdsValid
-                    // Filled/accented while there's something to commit, so
-                    // the one control that actually applies these five
-                    // fields reads as the primary action, not a peer of the
-                    // plain bordered field controls above it.
-                    selected: enabled
-                    bordered: true
-                    foreground: root.foreground
-                    accent: Color.accent
-                    fontFamily: root.fontFamily
-                    fontSize: Style.font.caption
-                    horizontalPadding: Style.space(12)
-                    verticalPadding: Style.space(4)
-                    onClicked: behaviourContent.saveDrafts()
+                    onModified: function(v) { settingsDraft.refreshIntervalSec = v }
                   }
 
                   Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: behaviourContent.settingsDirty ? "Unsaved changes" : "Saved"
-                    color: behaviourContent.settingsDirty ? root.warn : root.dim
+                    width: parent.width
+                    text: "Opening the panel always refreshes limits, and the refresh button (or r) runs every collector at once."
+                    color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
                   }
                 }
+              }
+            }
 
-                // Preferences wrap within the scrollable settings form.
-                Grid {
-                  id: preferenceGrid
-                  width: parent.width
-                  columns: 3
-                  columnSpacing: Style.space(12)
-                  rowSpacing: Style.space(12)
-                  readonly property real cellWidth: Math.floor((width - columnSpacing * 2) / 3)
+            // ============================================== Alerts tab
+            Column {
+              visible: root.settingsTab === "alerts"
+              width: parent.width
+              spacing: Style.space(10)
 
-                  Row {
-                    width: preferenceGrid.cellWidth
-                    spacing: Style.space(6)
+              BorderSurface {
+                width: parent.width
+                implicitHeight: thresholdContent.implicitHeight + Style.space(28)
+                color: root.alpha(root.foreground, 0.035)
+                borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+                radius: root.cardRadius
 
-                    ToggleSwitch {
-                      anchors.verticalCenter: parent.verticalCenter
-                      checked: usage.openInDetailedView
-                      foreground: root.foreground
-                      accent: Color.accent
-                      onToggled: usage.setOpenInDetailedView(!usage.openInDetailedView)
+                Column {
+                  id: thresholdContent
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(14)
+                  anchors.rightMargin: Style.space(14)
+                  spacing: Style.space(12)
+
+                  CardTitle {
+                    width: parent.width
+                    glyph: "󰓅"
+                    text: "Thresholds"
+                    note: settingsDraft.showsAvailable ? "available quota" : "quota used"
+                  }
+
+                  // The three zones a meter passes through, drawn from the
+                  // draft values so the effect of an edit is visible before
+                  // Save. In available mode the scale runs the other way.
+                  Item {
+                    id: thresholdScale
+                    width: parent.width
+                    height: Style.space(34)
+
+                    readonly property real warnUsed: settingsDraft.showsAvailable
+                      ? 1 - settingsDraft.warnThresholdPct / 100 : settingsDraft.warnThresholdPct / 100
+                    readonly property real criticalUsed: settingsDraft.showsAvailable
+                      ? 1 - settingsDraft.criticalThresholdPct / 100 : settingsDraft.criticalThresholdPct / 100
+                    function xFor(used) {
+                      var p = root.clamp(used, 0, 1)
+                      return (settingsDraft.showsAvailable ? 1 - p : p) * width
                     }
 
-                    Text {
-                      anchors.verticalCenter: parent.verticalCenter
-                      text: "Open in detailed view"
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
+                    Item {
+                      id: zoneTrack
+                      width: parent.width
+                      height: Style.space(10)
+                      clip: true
+
+                      Rectangle {
+                        anchors.fill: parent
+                        radius: height / 2
+                        color: root.track
+                      }
+
+                      Rectangle {
+                        x: Math.min(thresholdScale.xFor(0), thresholdScale.xFor(thresholdScale.warnUsed))
+                        width: Math.abs(thresholdScale.xFor(thresholdScale.warnUsed) - thresholdScale.xFor(0))
+                        height: parent.height
+                        color: usage.colorfulUsageMeters ? root.colorForSeverity("ok") : Commons.Color.accent
+                        opacity: 0.55
+                      }
+
+                      Rectangle {
+                        x: Math.min(thresholdScale.xFor(thresholdScale.warnUsed), thresholdScale.xFor(thresholdScale.criticalUsed))
+                        width: Math.abs(thresholdScale.xFor(thresholdScale.criticalUsed) - thresholdScale.xFor(thresholdScale.warnUsed))
+                        height: parent.height
+                        color: root.warn
+                        visible: thresholdScale.criticalUsed > thresholdScale.warnUsed
+                      }
+
+                      Rectangle {
+                        x: Math.min(thresholdScale.xFor(thresholdScale.criticalUsed), thresholdScale.xFor(1))
+                        width: Math.abs(thresholdScale.xFor(1) - thresholdScale.xFor(thresholdScale.criticalUsed))
+                        height: parent.height
+                        color: root.colorForSeverity("critical")
+                      }
+                    }
+
+                    Repeater {
+                      model: [
+                        { used: thresholdScale.warnUsed, label: settingsDraft.warnThresholdPct + "%", tone: "warn" },
+                        { used: thresholdScale.criticalUsed, label: settingsDraft.criticalThresholdPct + "%", tone: "critical" }
+                      ]
+
+                      Text {
+                        required property var modelData
+                        y: zoneTrack.height + Style.space(4)
+                        // Warn's label ends at its tick and Critical's starts
+                        // at its own, on the sides facing away from each
+                        // other, so close values never print on top of
+                        // one another.
+                        readonly property bool before: (modelData.tone === "warn") !== settingsDraft.showsAvailable
+                        x: root.clamp(before
+                            ? thresholdScale.xFor(modelData.used) - implicitWidth - Style.space(3)
+                            : thresholdScale.xFor(modelData.used) + Style.space(3),
+                          0, Math.max(0, thresholdScale.width - implicitWidth))
+                        text: modelData.label
+                        color: modelData.tone === "warn" ? root.warnText : root.textFor(root.colorForSeverity("critical"))
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                      }
                     }
                   }
 
                   Row {
-                    width: preferenceGrid.cellWidth
+                    width: parent.width
+                    spacing: Style.space(12)
+
+                    NumberField {
+                      width: (parent.width - parent.spacing) / 2
+                      fieldWidth: width
+                      label: settingsDraft.showsAvailable ? "Warn below (% left)" : "Warn at (% used)"
+                      value: settingsDraft.warnThresholdPct
+                      from: 1
+                      to: 99
+                      stepSize: 1
+                      foreground: root.foreground
+                      accent: root.warn
+                      fontFamily: root.fontFamily
+                      onModified: function(v) { settingsDraft.warnThresholdPct = v }
+                    }
+
+                    NumberField {
+                      width: (parent.width - parent.spacing) / 2
+                      fieldWidth: width
+                      label: settingsDraft.showsAvailable ? "Critical below (% left)" : "Critical at (% used)"
+                      value: settingsDraft.criticalThresholdPct
+                      from: settingsDraft.showsAvailable ? 0 : 1
+                      to: settingsDraft.showsAvailable ? 99 : 100
+                      stepSize: 1
+                      foreground: root.foreground
+                      accent: root.urgent
+                      fontFamily: root.fontFamily
+                      onModified: function(v) { settingsDraft.criticalThresholdPct = v }
+                    }
+                  }
+
+                  Text {
+                    width: parent.width
+                    // One fixed line, never appearing/disappearing: it swaps
+                    // between the normal hint and the validation error so
+                    // nothing below it jumps when Warn/Critical cross.
+                    text: settingsDraft.thresholdsValid
+                      ? (settingsDraft.showsAvailable
+                        ? "Warn when available quota falls this low; Critical marks the lower, urgent level."
+                        : "Warn colors a meter early; Critical marks it urgent and lights the bar.")
+                      : (settingsDraft.showsAvailable
+                        ? "Warn must stay above Critical — Save is disabled until that's fixed."
+                        : "Warn must stay below Critical — Save is disabled until that's fixed.")
+                    color: settingsDraft.thresholdsValid ? root.dim : root.textFor(root.urgent)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
+                }
+              }
+
+              BorderSurface {
+                width: parent.width
+                implicitHeight: notifyContent.implicitHeight + Style.space(28)
+                color: root.alpha(root.foreground, 0.035)
+                borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
+                radius: root.cardRadius
+
+                Column {
+                  id: notifyContent
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(14)
+                  anchors.rightMargin: Style.space(14)
+                  spacing: Style.space(12)
+
+                  CardTitle {
+                    width: parent.width
+                    glyph: "󰂜"
+                    text: "Notifications"
+                  }
+
+                  // Notifications are opt-in and fire once at each
+                  // threshold, not on every refresh.
+                  SettingToggle {
+                    width: parent.width
+                    title: "Threshold alerts"
+                    description: "One desktop notification when a provider crosses Warn, and one more at Critical."
+                    checked: usage.notificationsEnabled
+                    onToggled: usage.setNotificationsEnabled(!usage.notificationsEnabled)
+                  }
+
+                  // Test stays independent of the toggle and reports its
+                  // process result beside the button.
+                  Row {
                     spacing: Style.space(10)
 
-                    ToggleSwitch {
-                      anchors.verticalCenter: parent.verticalCenter
-                      checked: usage.showAvailablePercentage
-                      foreground: root.foreground
-                      accent: Color.accent
-                      onToggled: usage.setShowAvailablePercentage(!usage.showAvailablePercentage)
-                    }
-
-                    Text {
-                      anchors.verticalCenter: parent.verticalCenter
-                      text: "Show available quota"
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                    }
-                  }
-
-                  Row {
-                    width: preferenceGrid.cellWidth
-                    spacing: Style.space(6)
-
-                    ToggleSwitch {
-                      anchors.verticalCenter: parent.verticalCenter
-                      checked: usage.colorfulUsageMeters
-                      foreground: root.foreground
-                      accent: Color.accent
-                      onToggled: usage.setColorfulUsageMeters(!usage.colorfulUsageMeters)
-                    }
-
-                    Text {
-                      anchors.verticalCenter: parent.verticalCenter
-                      text: "Color-code meters"
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                    }
-                  }
-
-                  // Notifications are opt-in and fire once at each threshold,
-                  // not on every refresh. Test remains independent of the
-                  // toggle and reports its process result beside the button.
-                  Row {
-                    width: preferenceGrid.cellWidth
-                    spacing: Style.space(6)
-
-                    ToggleSwitch {
-                      anchors.verticalCenter: parent.verticalCenter
-                      checked: usage.notificationsEnabled
-                      foreground: root.foreground
-                      accent: Color.accent
-                      onToggled: usage.setNotificationsEnabled(!usage.notificationsEnabled)
-                    }
-
-                    Text {
-                      anchors.verticalCenter: parent.verticalCenter
-                      text: "Threshold alerts"
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                    }
-
                     Button {
+
+                      radius: root.controlRadius
                       anchors.verticalCenter: parent.verticalCenter
-                      text: "Test"
-                      tooltipText: "Send one notification now — independent of the notification toggle."
+                      text: "Send a test"
+                      tooltipText: "Send one notification now — independent of the toggle above."
                       bordered: true
                       foreground: root.foreground
                       fontFamily: root.fontFamily
-                      fontSize: Style.font.caption
-                      verticalPadding: Style.space(4)
+                      fontSize: Style.font.bodySmall
+                      horizontalPadding: Style.space(12)
+                      verticalPadding: Style.space(5)
                       onClicked: root.sendTestNotification()
                     }
 
                     Text {
                       anchors.verticalCenter: parent.verticalCenter
                       text: root.notificationTestStatus
-                      color: text === "Failed" ? root.urgent : root.dim
+                      color: text === "Failed" ? root.textFor(root.urgent) : root.dim
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
                     }
                   }
-                }
 
-                Text {
-                  width: parent.width
-                  text: "Available mode switches percentages, meters, and warning values together. Meter colors are optional; alerts remain opt-in."
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
+                  Text {
+                    width: parent.width
+                    text: "Nothing showing up? Omarchy's Do Not Disturb hides the popup; delivered alerts still land in notification history."
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
                 }
               }
             }
 
-            // ----- Multi-device sync -----
+            // =========================================== Sync tab
             // The panel never syncs anything itself — it only reads and
             // writes one JSON snapshot per machine into this folder. Combine
             // usage across machines by pointing every one of them at the
@@ -3877,89 +5093,75 @@ Panel {
             // (Syncthing, Nextcloud, a network mount — anything works).
             BorderSurface {
               id: syncSection
+              visible: root.settingsTab === "sync"
               width: parent.width
               implicitHeight: syncContent.implicitHeight + Style.space(28)
               color: root.alpha(root.foreground, 0.035)
               borderSpec: Border.flat(root.alpha(root.foreground, 0.12), 1)
-              radius: Style.cornerRadius
+              radius: root.cardRadius
 
               Column {
                 id: syncContent
-                anchors.fill: parent
-                anchors.margins: Style.space(14)
-                spacing: Style.space(10)
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(14)
+                anchors.rightMargin: Style.space(14)
+                spacing: Style.space(12)
 
-                // Same draft pattern as behaviourContent above: the folder
-                // path only ever changes here or on Save, so a keystroke in
-                // progress can't be clobbered by a periodic settings reload.
+                // Same draft pattern as settingsDraft: the folder path only
+                // ever changes here or on Save, so a keystroke in progress
+                // can't be clobbered by a periodic settings reload.
                 property string draftSyncDir: usage.syncDir
                 readonly property bool syncDirDirty: draftSyncDir !== usage.syncDir
 
                 function resyncDraft() { draftSyncDir = usage.syncDir }
                 function saveDraft() { usage.setSyncDir(draftSyncDir) }
 
-                Connections {
-                  target: settingsSection
-                  function onVisibleChanged() { if (settingsSection.visible) syncContent.resyncDraft() }
-                }
-
-                Text {
-                  text: "Multi-device sync"
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                }
-
-                Text {
+                CardTitle {
                   width: parent.width
-                  text: "Combine today's tokens and history from every machine that shares this folder. Point each machine at the same already-synced folder (Syncthing, Nextcloud, a network mount — any tool that keeps a directory identical everywhere); this panel only reads and writes its own snapshot inside it, never the syncing itself."
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
+                  glyph: "󰓦"
+                  text: "Multi-device sync"
+                  note: usage.syncEnabled ? "on" : "off"
                 }
 
-                Row {
-                  spacing: Style.space(10)
+                SettingToggle {
+                  width: parent.width
+                  title: "Combine machines"
+                  description: "Add up today's tokens and history from every machine that shares one already-synced folder (Syncthing, Nextcloud, a network mount). This panel only reads and writes its own snapshot there — it never does the syncing."
+                  checked: usage.syncEnabled
+                  onToggled: usage.setSyncEnabled(!usage.syncEnabled)
+                }
 
-                  ToggleSwitch {
-                    anchors.verticalCenter: parent.verticalCenter
-                    checked: usage.syncEnabled
-                    foreground: root.foreground
-                    accent: Color.accent
-                    onToggled: usage.setSyncEnabled(!usage.syncEnabled)
-                  }
+                Column {
+                  visible: usage.syncEnabled
+                  width: parent.width
+                  spacing: Style.space(6)
 
                   Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "Enable sync"
-                    color: root.foreground
+                    text: "Sync folder"
+                    color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
                   }
-                }
-
-                Row {
-                  visible: usage.syncEnabled
-                  spacing: Style.space(10)
 
                   Rectangle {
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(320)
-                    height: Style.space(30)
-                    radius: Style.cornerRadius
+                    width: parent.width
+                    height: Style.space(32)
+                    radius: root.controlRadius
                     color: root.alpha(root.foreground, 0.06)
                     border.width: 1
-                    border.color: root.alpha(root.foreground, syncDirInput.activeFocus ? 0.4 : 0.2)
+                    border.color: syncDirInput.activeFocus ? Commons.Color.accent : root.alpha(root.foreground, 0.2)
 
                     TextInput {
                       id: syncDirInput
                       anchors.fill: parent
-                      anchors.leftMargin: Style.space(8)
-                      anchors.rightMargin: Style.space(8)
+                      anchors.leftMargin: Style.space(10)
+                      anchors.rightMargin: Style.space(10)
                       verticalAlignment: TextInput.AlignVCenter
                       clip: true
                       color: root.foreground
+                      selectionColor: root.alpha(Commons.Color.accent, 0.4)
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.bodySmall
                       text: syncContent.draftSyncDir
@@ -3977,40 +5179,58 @@ Panel {
                     }
                   }
 
-                  Button {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "Save"
-                    enabled: syncContent.syncDirDirty
-                    selected: enabled
-                    bordered: true
-                    foreground: root.foreground
-                    accent: Color.accent
-                    fontFamily: root.fontFamily
-                    fontSize: Style.font.caption
-                    horizontalPadding: Style.space(12)
-                    verticalPadding: Style.space(4)
-                    onClicked: syncContent.saveDraft()
+                  Text {
+                    width: parent.width
+                    text: "Use the same folder on every machine. Enter or Save applies it."
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
                   }
                 }
 
-                Text {
+                // Live status, with a colored dot so the state reads at a
+                // glance: accent when merging, amber while waiting.
+                Row {
                   visible: usage.syncEnabled
                   width: parent.width
-                  text: String(usage.syncDir || "").trim() === ""
-                    ? "Set a folder above, then Save, to start writing this device's snapshot into it."
-                    : (usage.syncStatusText !== "" ? usage.syncStatusText
-                      : (usage.aggregateData && usage.aggregateData.deviceCount > 1
-                        ? "Merged from " + usage.aggregateData.deviceCount + " devices"
-                        : "Waiting for another device to write into this folder…"))
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
+                  spacing: Style.space(8)
+
+                  readonly property bool merging: usage.aggregateData && usage.aggregateData.deviceCount > 1
+                    && usage.syncStatusText === ""
+
+                  Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(8)
+                    height: width
+                    radius: width / 2
+                    color: parent.merging ? Commons.Color.accent : root.warn
+                  }
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - Style.space(16)
+                    text: String(usage.syncDir || "").trim() === ""
+                      ? "Set a folder above, then Save, to start writing this device's snapshot."
+                      : (usage.syncStatusText !== "" ? usage.syncStatusText
+                        : (usage.aggregateData && usage.aggregateData.deviceCount > 1
+                          ? "Merged from " + usage.aggregateData.deviceCount + " devices"
+                          : "Waiting for another device to write into this folder…"))
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WordWrap
+                  }
                 }
               }
             }
-          }
 
+            // Room for the pinned save bar so it never covers the last card.
+            Item {
+              width: parent.width
+              height: saveBar.visible ? saveBar.height + Style.space(4) : 0
+            }
+          }
           Text {
             visible: text !== ""
             width: parent.width
@@ -4024,15 +5244,855 @@ Panel {
           }
         }
       }
+
+      // Pinned to the bottom of the card while Settings holds unsaved
+      // numeric or folder edits, whichever tab they were made on.
+      Rectangle {
+        id: saveBar
+        readonly property bool pending: settingsDraft.dirty || syncContent.syncDirDirty
+        readonly property bool valid: !settingsDraft.thresholdsDirty || settingsDraft.thresholdsValid
+        visible: root.settingsOpen && pending
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        height: Style.space(46)
+        radius: root.cardRadius
+        color: root.mix(root.surface, Commons.Color.accent, 0.10)
+        border.width: 1
+        border.color: root.alpha(Commons.Color.accent, 0.45)
+
+        Row {
+          anchors.left: parent.left
+          anchors.leftMargin: Style.space(14)
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: Style.space(8)
+
+          Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            width: Style.space(8)
+            height: width
+            radius: width / 2
+            color: saveBar.valid ? root.warn : root.urgent
+          }
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: saveBar.valid ? "Unsaved changes" : "Fix the thresholds to save"
+            color: saveBar.valid ? root.foreground : root.textFor(root.urgent)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+          }
+        }
+
+        Row {
+          anchors.right: parent.right
+          anchors.rightMargin: Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: Style.space(6)
+
+          Button {
+
+            radius: root.controlRadius
+            text: "Discard"
+            bordered: true
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            fontSize: Style.font.bodySmall
+            horizontalPadding: Style.space(12)
+            verticalPadding: Style.space(5)
+            onClicked: {
+              settingsDraft.resyncDrafts()
+              syncContent.resyncDraft()
+            }
+          }
+
+          Button {
+
+            radius: root.controlRadius
+            text: "Save"
+            enabled: saveBar.valid
+            selected: true
+            bordered: true
+            foreground: root.foreground
+            accent: Commons.Color.accent
+            fontFamily: root.fontFamily
+            fontSize: Style.font.bodySmall
+            horizontalPadding: Style.space(16)
+            verticalPadding: Style.space(5)
+            onClicked: {
+              settingsDraft.saveDrafts()
+              if (syncContent.syncDirDirty) syncContent.saveDraft()
+            }
+          }
+        }
+      }
     }
   }
 
-  // A limit window: label and percentage, meter, and reset countdown.
+  // ------------------------------------------------------- settings parts
+
+  component LaunchAccountButton: Button {
+    id: launchAccount
+    radius: root.controlRadius
+    required property string providerBrand
+    required property string accountId
+
+    width: Style.space(68)
+    text: selected ? "Active" : "Use"
+    tooltipText: selected ? "Active account for the bar and CLI launch" : "Use this account in the bar and for CLI launch"
+    selected: usage.activeAccountId(providerBrand) === accountId
+    bordered: true
+    focusable: true
+    foreground: root.foreground
+    fontFamily: root.fontFamily
+    fontSize: Style.font.caption
+    onClicked: if (!selected) usage.selectAccount(launchAccount.providerBrand, launchAccount.accountId)
+  }
+
+  // A row label on the left, any control (the default child) on the right.
+  component SettingLine: Item {
+    id: settingLine
+    property string title: ""
+    // The control column has an explicit width; children fill it with
+    // `width: parent.width`. (Sizing it from childrenRect made a child that
+    // sized itself from its parent collapse to zero.)
+    property real controlWidth: Math.min(Style.space(236), width * 0.66)
+    default property alias control: settingLineControl.data
+
+    implicitHeight: Math.max(settingLineTitle.implicitHeight, settingLineControl.height)
+
+    Text {
+      id: settingLineTitle
+      anchors.left: parent.left
+      anchors.right: settingLineControl.left
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      text: settingLine.title
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      elide: Text.ElideRight
+    }
+
+    Item {
+      id: settingLineControl
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      width: settingLine.controlWidth
+      height: childrenRect.height
+    }
+  }
+
+  // A labelled switch with a sentence of explanation underneath. The whole
+  // row toggles, not only the small knob.
+  component SettingToggle: Item {
+    id: settingToggle
+    property string title: ""
+    property string description: ""
+    property bool checked: false
+    signal toggled()
+
+    implicitHeight: Math.max(settingToggleText.implicitHeight, settingToggleSwitch.implicitHeight)
+
+    Column {
+      id: settingToggleText
+      anchors.left: parent.left
+      anchors.right: settingToggleSwitch.left
+      anchors.rightMargin: Style.space(12)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(3)
+
+      Text {
+        width: parent.width
+        text: settingToggle.title
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+        wrapMode: Text.WordWrap
+      }
+
+      Text {
+        visible: settingToggle.description !== ""
+        width: parent.width
+        text: settingToggle.description
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+        lineHeight: 1.1
+      }
+    }
+
+    MouseArea {
+      anchors.fill: settingToggleText
+      cursorShape: Qt.PointingHandCursor
+      onClicked: settingToggle.toggled()
+    }
+
+    ToggleSwitch {
+
+      rounded: true
+      id: settingToggleSwitch
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      checked: settingToggle.checked
+      foreground: root.foreground
+      accent: Commons.Color.accent
+      onToggled: settingToggle.toggled()
+    }
+  }
+
+  // A pill-shaped segmented control: one choice of a few, the current one
+  // filled in the accent tint. `options` is [{ value, label, tip }].
+  component Segmented: Rectangle {
+    id: segmented
+    property var options: []
+    property string current: ""
+    signal picked(string value)
+
+    implicitHeight: Style.space(28)
+    height: implicitHeight
+    radius: root.controlRadius
+    color: root.alpha(root.foreground, 0.05)
+    border.width: 1
+    border.color: root.alpha(root.foreground, 0.12)
+
+    Row {
+      anchors.fill: parent
+      anchors.margins: Style.space(2)
+      spacing: Style.space(2)
+
+      Repeater {
+        model: segmented.options
+
+        Rectangle {
+          id: segment
+          required property var modelData
+          readonly property bool chosen: segmented.current === modelData.value
+          width: (segmented.width - Style.space(4) - Style.space(2) * Math.max(0, segmented.options.length - 1))
+            / Math.max(1, segmented.options.length)
+          height: parent.height
+          radius: root.controlRadius - Style.space(2)
+          color: chosen ? root.alpha(Commons.Color.accent, 0.22)
+            : (segmentHover.containsMouse && segmented.enabled ? root.alpha(root.foreground, 0.07) : "transparent")
+          border.width: chosen ? 1 : 0
+          border.color: root.alpha(Commons.Color.accent, 0.55)
+
+          Behavior on color { ColorAnimation { duration: 110 } }
+
+          Text {
+            anchors.centerIn: parent
+            width: parent.width - Style.space(6)
+            horizontalAlignment: Text.AlignHCenter
+            text: segment.modelData.label
+            color: segment.chosen ? root.foreground : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: segment.chosen
+            elide: Text.ElideRight
+          }
+
+          MouseArea {
+            id: segmentHover
+            anchors.fill: parent
+            hoverEnabled: true
+            enabled: segmented.enabled
+            cursorShape: Qt.PointingHandCursor
+            onClicked: if (!segment.chosen) segmented.picked(segment.modelData.value)
+          }
+
+          PanelToolTip {
+            visible: segmentHover.containsMouse && String(segment.modelData.tip || "") !== ""
+            text: String(segment.modelData.tip || "")
+            fontFamily: root.fontFamily
+          }
+        }
+      }
+    }
+  }
+
+  // One limit window as a ring, with its reset underneath: countdown,
+  // wall-clock time and the outlook at the current rate.
+  // `creditMode` draws a prepaid balance's credit left instead.
+  component RingTile: Item {
+    id: ringTile
+    property var window: null
+    property bool creditMode: false
+    property color tint: Commons.Color.accent
+    readonly property var pace: creditMode ? null : root.paceFor(window)
+    readonly property bool stale: !creditMode && root.windowIsStale(window)
+    readonly property bool hasValue: creditMode ? (!!root.balance && root.balance.funded > 0) : (!!window && window.percent >= 0)
+    readonly property real ringValue: creditMode
+      ? (hasValue ? root.clamp(root.balance.remaining / root.balance.funded, 0, 1) : 0)
+      : (hasValue ? root.displayPercent(window.percent) : 0)
+    readonly property color ringColor: creditMode ? root.colorForSeverity(root.balanceSeverity) === root.foreground
+      ? Commons.Color.accent : root.colorForSeverity(root.balanceSeverity) : tint
+    readonly property real resetMs: creditMode ? -1 : root.resetMsFor(window)
+    readonly property bool full: !creditMode && !!window && window.percent >= 1
+    readonly property bool runsOut: !full && !stale && resetMs > 0 && !!pace && pace.runsOutInMs >= 0
+    readonly property string resetLead: stale ? "Window reset" : (resetMs > 0 ? (full ? "Back in" : "Resets in") : "No reset reported")
+    readonly property string resetValue: !stale && resetMs > 0 ? root.formatDuration(resetMs) : ""
+    readonly property string resetWhen: stale ? "updates on the next refresh"
+      : (resetMs > 0 ? root.resetClock(window) : "")
+    readonly property string outlook: {
+      if (creditMode || stale || full || !pace) return ""
+      if (runsOut) return "Runs out " + root.formatDuration(Math.max(0, resetMs - pace.runsOutInMs)) + " before reset"
+      if (pace.status === "idle" || !(pace.projected >= 0)) return ""
+      var used = Math.min(99, Math.round(pace.projected * 100))
+      return usage.showAvailablePercentage ? "~" + (100 - used) + "% left at reset" : "~" + used + "% used by reset"
+    }
+    readonly property string detail: {
+      if (creditMode || !window) return ""
+      var lines = [String(window.title || "Limit") + " · " + Format.formatPercent(window.percent, usage.showAvailablePercentage)
+        + (usage.showAvailablePercentage ? " left" : " used")]
+      if (resetWhen !== "" && !stale) lines.push("Resets " + resetWhen)
+      if (runsOut)
+        lines.push("At this rate it empties " + root.formatResetMoment(root.nowMs + pace.runsOutInMs))
+      if (pace && pace.elapsed >= 0 && !stale) lines.push(Math.round(pace.elapsed * 100) + "% of the window has passed (the dot on the ring)")
+      return lines.join("\n")
+    }
+
+    implicitHeight: ringTileColumn.implicitHeight
+
+    Column {
+      id: ringTileColumn
+      width: parent.width
+      spacing: Style.space(6)
+
+      Item {
+        width: parent.width
+        height: Style.space(100)
+
+        RingGauge {
+          id: tileGauge
+          anchors.horizontalCenter: parent.horizontalCenter
+          width: parent.height
+          height: parent.height
+          value: ringTile.ringValue
+          marker: ringTile.pace ? root.displayPercent(ringTile.pace.elapsed) : -1
+          color: ringTile.ringColor
+          thickness: Style.space(9)
+          opacity: ringTile.stale ? 0.5 : 1.0
+        }
+
+        Column {
+          anchors.centerIn: tileGauge
+          spacing: 0
+
+          Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: !ringTile.hasValue ? "—"
+              : (ringTile.creditMode ? Math.round(ringTile.ringValue * 100) + "%"
+                : Format.formatPercent(ringTile.window.percent, usage.showAvailablePercentage))
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Math.round(Style.font.display * 0.95)
+            font.bold: true
+          }
+
+          Text {
+            anchors.horizontalCenter: parent.horizontalCenter
+            text: ringTile.creditMode ? "credit left" : (usage.showAvailablePercentage ? "left" : "used")
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+      }
+
+      Row {
+        anchors.horizontalCenter: parent.horizontalCenter
+        spacing: Style.space(6)
+
+        Rectangle {
+          anchors.verticalCenter: parent.verticalCenter
+          width: Style.space(7)
+          height: width
+          radius: width / 2
+          color: ringTile.ringColor
+        }
+
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: ringTile.creditMode ? "Prepaid credit" : (ringTile.window ? String(ringTile.window.title || "Limit") : "")
+          textFormat: Text.PlainText
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: true
+          font.capitalization: Font.AllUppercase
+          font.letterSpacing: 0.8
+          elide: Text.ElideRight
+          width: Math.min(implicitWidth, ringTile.width - Style.space(14))
+        }
+      }
+
+      // When this window hands its room back (the one place the panel
+      // says so) and, under it, how the current rate compares with that.
+      Column {
+        visible: !ringTile.creditMode
+        width: parent.width
+        spacing: Style.space(2)
+
+        Row {
+          anchors.horizontalCenter: parent.horizontalCenter
+          spacing: Style.space(4)
+
+          Text {
+            anchors.baseline: resetValueText.baseline
+            text: ringTile.resetLead
+            textFormat: Text.PlainText
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          Text {
+            id: resetValueText
+            visible: text !== ""
+            text: ringTile.resetValue
+            textFormat: Text.PlainText
+            color: ringTile.full ? root.textFor(root.urgent) : root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+          }
+        }
+
+        Text {
+          width: parent.width
+          horizontalAlignment: Text.AlignHCenter
+          elide: Text.ElideRight
+          text: ringTile.resetWhen
+          textFormat: Text.PlainText
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+
+        // Always one line tall, so both tiles keep the same height
+        // whatever their outlook says.
+        Text {
+          width: parent.width
+          horizontalAlignment: Text.AlignHCenter
+          elide: Text.ElideRight
+          text: ringTile.outlook
+          textFormat: Text.PlainText
+          color: ringTile.runsOut ? root.warnText : root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: ringTile.runsOut
+        }
+      }
+    }
+
+    MouseArea {
+      id: ringTileHover
+      anchors.fill: parent
+      hoverEnabled: true
+      acceptedButtons: Qt.NoButton
+    }
+
+    PanelToolTip {
+      visible: ringTileHover.containsMouse && text !== ""
+      text: ringTile.detail
+      fontFamily: root.fontFamily
+    }
+  }
+
+  // A row of equal tabs with a glyph and label each; the current one is
+  // filled in the accent tint. `tabs` is [{ id, label, glyph }]; `badges`
+  // maps a tab id to true to mark it (unsaved edits, for example).
+  component TabStrip: Rectangle {
+    id: tabStrip
+    property var tabs: []
+    property string current: ""
+    property var badges: ({})
+    signal picked(string id)
+
+    // Glyphs show on every tab or on none: the widest label decides.
+    readonly property real cellWidth: (width - Style.space(6) - Style.space(3) * Math.max(0, tabs.length - 1))
+      / Math.max(1, tabs.length)
+    readonly property string longestLabel: {
+      var longest = ""
+      for (var i = 0; i < tabs.length; i++)
+        if (String(tabs[i].label).length > longest.length) longest = String(tabs[i].label)
+      return longest
+    }
+    readonly property bool showGlyphs: cellWidth >= tabLabelMetrics.advanceWidth + Style.font.body + Style.space(20)
+
+    TextMetrics {
+      id: tabLabelMetrics
+      text: tabStrip.longestLabel
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      font.bold: true
+    }
+
+    height: Style.space(34)
+    radius: root.cardRadius
+    color: root.alpha(root.foreground, 0.05)
+    border.width: 1
+    border.color: root.alpha(root.foreground, 0.10)
+
+    Row {
+      anchors.fill: parent
+      anchors.margins: Style.space(3)
+      spacing: Style.space(3)
+
+      Repeater {
+        model: tabStrip.tabs
+
+        Rectangle {
+          id: tabCell
+          required property var modelData
+          readonly property bool chosen: tabStrip.current === modelData.id
+          width: tabStrip.cellWidth
+          height: parent.height
+          radius: root.controlRadius
+          color: chosen ? root.alpha(Commons.Color.accent, 0.18)
+            : (tabCellHover.containsMouse ? root.alpha(root.foreground, 0.06) : "transparent")
+          border.width: chosen ? 1 : 0
+          border.color: root.alpha(Commons.Color.accent, 0.45)
+
+          Behavior on color { ColorAnimation { duration: 120 } }
+
+          Row {
+            anchors.centerIn: parent
+            spacing: Style.space(5)
+
+            // The glyphs give way (all together) when five tabs share a
+            // narrow row, so no label has to be cut.
+            Text {
+              id: tabCellGlyph
+              anchors.verticalCenter: parent.verticalCenter
+              text: tabCell.modelData.glyph || ""
+              visible: text !== "" && tabStrip.showGlyphs
+              color: tabCell.chosen ? root.accentText : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+
+            Text {
+              id: tabCellLabel
+              anchors.verticalCenter: parent.verticalCenter
+              text: tabCell.modelData.label
+              color: tabCell.chosen ? root.foreground : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: tabCell.chosen
+            }
+          }
+
+          Rectangle {
+            visible: !!tabStrip.badges[tabCell.modelData.id]
+            anchors.top: parent.top
+            anchors.right: parent.right
+            anchors.margins: Style.space(4)
+            width: Style.space(6)
+            height: width
+            radius: width / 2
+            color: root.warn
+          }
+
+          MouseArea {
+            id: tabCellHover
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: tabStrip.picked(tabCell.modelData.id)
+          }
+        }
+      }
+    }
+  }
+
+  // ------------------------------------------------------- dashboard parts
+
+  // A 270° gauge, open at the bottom: the fullest limit window at a glance.
+  // `marker` is where the window's clock stands (same 0-1 scale as value),
+  // drawn as a small dot on the track so "used vs elapsed" reads without a
+  // second number.
+  component RingGauge: Canvas {
+    id: ring
+    property real value: 0
+    property real marker: -1
+    property color color: root.foreground
+    property color trackColor: root.track
+    property color markerColor: root.foreground
+    property real thickness: Style.space(9)
+    property real shownValue: root.clamp(value, 0, 1)
+
+    Behavior on shownValue {
+      NumberAnimation { duration: 650; easing.type: Easing.OutCubic }
+    }
+
+    // Repaint on a live theme switch: onPaint reads these root colors
+    // directly, and Canvas does not track them on its own.
+    readonly property string themeKey: [root.foreground, root.surface, root.track, root.dim, root.fontFamily].join("|")
+    onThemeKeyChanged: requestPaint()
+    onShownValueChanged: requestPaint()
+    onMarkerChanged: requestPaint()
+    onMarkerColorChanged: requestPaint()
+    onColorChanged: requestPaint()
+    onTrackColorChanged: requestPaint()
+    onWidthChanged: requestPaint()
+    onHeightChanged: requestPaint()
+    onVisibleChanged: if (visible) requestPaint()
+
+    onPaint: {
+      var ctx = getContext("2d")
+      try {
+        ctx.reset()
+        if (width <= 0 || height <= 0) return
+        var r = Math.min(width, height) / 2 - ring.thickness / 2 - 1
+        if (r <= 0) return
+        var cx = width / 2
+        var cy = height / 2
+        var start = Math.PI * 0.75
+        var sweep = Math.PI * 1.5
+        ctx.lineCap = "round"
+        ctx.lineWidth = ring.thickness
+
+        ctx.strokeStyle = ring.trackColor
+        ctx.beginPath()
+        ctx.arc(cx, cy, r, start, start + sweep, false)
+        ctx.stroke()
+
+        if (ring.shownValue > 0.001) {
+          var end = start + sweep * ring.shownValue
+          // A soft wider underlay reads as a glow without a blur pass.
+          ctx.strokeStyle = Qt.rgba(ring.color.r, ring.color.g, ring.color.b, 0.18)
+          ctx.lineWidth = ring.thickness + Style.space(6)
+          ctx.beginPath()
+          ctx.arc(cx, cy, r, start, end, false)
+          ctx.stroke()
+
+          var gradient = ctx.createLinearGradient(cx - r, cy + r, cx + r, cy - r)
+          gradient.addColorStop(0, Qt.rgba(ring.color.r, ring.color.g, ring.color.b, 0.55))
+          gradient.addColorStop(1, ring.color)
+          ctx.strokeStyle = gradient
+          ctx.lineWidth = ring.thickness
+          ctx.beginPath()
+          ctx.arc(cx, cy, r, start, end, false)
+          ctx.stroke()
+        }
+
+        if (ring.marker >= 0) {
+          var angle = start + sweep * root.clamp(ring.marker, 0, 1)
+          var mx = cx + Math.cos(angle) * r
+          var my = cy + Math.sin(angle) * r
+          ctx.fillStyle = root.surface
+          ctx.beginPath()
+          ctx.arc(mx, my, ring.thickness * 0.42 + 1.5, 0, Math.PI * 2)
+          ctx.fill()
+          ctx.fillStyle = ring.markerColor
+          ctx.beginPath()
+          ctx.arc(mx, my, ring.thickness * 0.42, 0, Math.PI * 2)
+          ctx.fill()
+        }
+      } catch (e) {
+        // A gauge that fails to paint leaves an empty square, never a
+        // broken panel.
+      }
+    }
+  }
+
+  // Thin full-circle progress ring drawn around a provider chip's mark, so
+  // the switcher doubles as an every-account overview.
+  component ChipRing: Canvas {
+    id: chipRing
+    property real value: -1
+    property color color: root.foreground
+    property real thickness: Math.max(2, Style.space(2.5))
+
+    // Repaint on a live theme switch: onPaint reads these root colors
+    // directly, and Canvas does not track them on its own.
+    readonly property string themeKey: [root.foreground, root.surface, root.track, root.dim, root.fontFamily].join("|")
+    onThemeKeyChanged: requestPaint()
+    onValueChanged: requestPaint()
+    onColorChanged: requestPaint()
+    onWidthChanged: requestPaint()
+    onHeightChanged: requestPaint()
+    onVisibleChanged: if (visible) requestPaint()
+
+    onPaint: {
+      var ctx = getContext("2d")
+      try {
+        ctx.reset()
+        if (width <= 0 || height <= 0) return
+        var r = Math.min(width, height) / 2 - chipRing.thickness / 2 - 0.5
+        var cx = width / 2
+        var cy = height / 2
+        ctx.lineWidth = chipRing.thickness
+        ctx.lineCap = "round"
+        ctx.strokeStyle = root.alpha(root.foreground, 0.10)
+        ctx.beginPath()
+        ctx.arc(cx, cy, r, 0, Math.PI * 2, false)
+        ctx.stroke()
+        if (chipRing.value > 0.001) {
+          ctx.strokeStyle = chipRing.color
+          ctx.beginPath()
+          ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * root.clamp(chipRing.value, 0, 1), false)
+          ctx.stroke()
+        }
+      } catch (e) {
+      }
+    }
+  }
+
+  // A compact number card: glyph + label, a large value, and a one-line hint.
+  component StatTile: BorderSurface {
+    id: statTile
+    property string glyph: ""
+    property string label: ""
+    property string valueText: ""
+    property string hint: ""
+    property color hintColor: root.dim
+    property color glyphColor: root.accentText
+    property string tooltipText: ""
+
+    implicitHeight: tileContent.implicitHeight + Style.space(20)
+    color: root.alpha(root.foreground, 0.035)
+    borderSpec: Border.flat(root.alpha(root.foreground, 0.10), 1)
+    radius: root.cardRadius
+
+    Column {
+      id: tileContent
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(8)
+      spacing: Style.space(3)
+
+      Row {
+        spacing: Style.space(5)
+        width: parent.width
+
+        Text {
+          visible: statTile.glyph !== ""
+          anchors.verticalCenter: parent.verticalCenter
+          text: statTile.glyph
+          color: statTile.glyphColor
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
+
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          width: parent.width - x
+          text: statTile.label
+          textFormat: Text.PlainText
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.capitalization: Font.AllUppercase
+          font.letterSpacing: 0.6
+          elide: Text.ElideRight
+        }
+      }
+
+      Text {
+        width: parent.width
+        text: statTile.valueText
+        textFormat: Text.PlainText
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Math.round(Style.font.subtitle * 1.3)
+        font.bold: true
+        elide: Text.ElideRight
+      }
+
+      // Always present (blank when there is no hint) so tiles in one row
+      // keep the same height.
+      Text {
+        width: parent.width
+        text: statTile.hint !== "" ? statTile.hint : " "
+        textFormat: Text.PlainText
+        color: statTile.hintColor
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
+    }
+
+    MouseArea {
+      id: tileHover
+      anchors.fill: parent
+      hoverEnabled: statTile.tooltipText !== ""
+      acceptedButtons: Qt.NoButton
+    }
+
+    PanelToolTip {
+      visible: tileHover.containsMouse && statTile.tooltipText !== ""
+      text: statTile.tooltipText
+      fontFamily: root.fontFamily
+    }
+  }
+
+  // Section card title: an accent glyph, an uppercase caption, and an
+  // optional right-aligned note.
+  component CardTitle: Item {
+    id: cardTitle
+    property string glyph: ""
+    property string text: ""
+    property string note: ""
+
+    implicitHeight: Math.max(cardTitleLabel.implicitHeight, cardTitleNote.implicitHeight)
+
+    Row {
+      anchors.left: parent.left
+      anchors.right: cardTitleNote.left
+      anchors.rightMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(6)
+
+      Text {
+        visible: cardTitle.glyph !== ""
+        anchors.verticalCenter: parent.verticalCenter
+        text: cardTitle.glyph
+        color: root.accentText
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+      }
+
+      Text {
+        id: cardTitleLabel
+        anchors.verticalCenter: parent.verticalCenter
+        text: cardTitle.text
+        textFormat: Text.PlainText
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        font.bold: true
+        font.capitalization: Font.AllUppercase
+        font.letterSpacing: 0.8
+      }
+    }
+
+    Text {
+      id: cardTitleNote
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      text: cardTitle.note
+      textFormat: Text.PlainText
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+  }
+
+  // A limit window: label and percentage, meter with the window's clock
+  // marked on it, reset countdown, and how the window is pacing.
   component LimitRow: Column {
     id: limitRow
     property var window: null
+    opacity: root.windowIsStale(window) ? 0.6 : 1.0
 
     readonly property string severity: window ? root.severityForPercent(window.percent) : "ok"
+    readonly property var pace: root.paceFor(window)
     // Only providers that report an explicit quota get this. A percentage
     // meter alone cannot be turned into a token burn projection honestly.
     readonly property var paceProjection: Pace.projectExhaustion(
@@ -4065,9 +6125,10 @@ Panel {
         text: limitRow.window && limitRow.window.percent >= 0
           ? Format.formatPercent(limitRow.window.percent, usage.showAvailablePercentage)
           : "n/a"
-        color: root.foreground
+        color: limitRow.severity === "ok" ? root.foreground : root.textFor(root.colorForSeverity(limitRow.severity))
         font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
+        font.pixelSize: Style.font.body
+        font.bold: true
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
       }
@@ -4077,26 +6138,56 @@ Panel {
       width: parent.width
       value: limitRow.window && limitRow.window.percent >= 0
         ? root.displayPercent(limitRow.window.percent) : -1
+      // Where the clock stands in this window. In used mode, fill past the
+      // tick means the allowance is going faster than time; in available
+      // mode both run down, so fill short of the tick means the same.
+      marker: limitRow.pace ? root.displayPercent(limitRow.pace.elapsed) : -1
       severity: limitRow.severity
     }
 
-    Text {
-      id: resetText
+    Item {
       width: parent.width
-      text: {
-        var remainingMs = root.resetMsFor(limitRow.window)
-        return remainingMs > 0 ? "Resets in " + root.formatDuration(remainingMs) : ""
+      implicitHeight: Math.max(resetText.implicitHeight, paceLabel.implicitHeight)
+      visible: resetText.text !== "" || paceLabel.text !== ""
+
+      Text {
+        id: resetText
+        anchors.left: parent.left
+        anchors.verticalCenter: parent.verticalCenter
+        text: {
+          if (root.windowIsStale(limitRow.window)) return "Reset passed · updates on the next refresh"
+          var remainingMs = root.resetMsFor(limitRow.window)
+          return remainingMs > 0
+            ? "Resets in " + root.formatDuration(remainingMs) + " · " + root.resetClock(limitRow.window) : ""
+        }
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
       }
-      color: root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
+
+      Text {
+        id: paceLabel
+        anchors.right: parent.right
+        anchors.left: resetText.right
+        anchors.leftMargin: Style.space(8)
+        anchors.verticalCenter: parent.verticalCenter
+        horizontalAlignment: Text.AlignRight
+        // One projection per row: a real token quota (the trend line
+        // below) outranks the window's percentage rate.
+        text: root.paceText(limitRow.paceProjection ? root.withoutRunOut(limitRow.pace) : limitRow.pace)
+        textFormat: Text.PlainText
+        color: root.paceColor(limitRow.paceProjection ? root.withoutRunOut(limitRow.pace) : limitRow.pace)
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
     }
 
     Text {
       visible: !!limitRow.paceProjection && limitRow.paceProjection.exhaustsBeforeReset
       width: parent.width
       text: (limitRow.paceProjection && limitRow.paceProjection.exhaustsBeforeReset)
-        ? "At this pace: exhausted in " + root.formatDuration(limitRow.paceProjection.untilExhaustionMs) : ""
+        ? "Token trend: exhausted in " + root.formatDuration(limitRow.paceProjection.untilExhaustionMs) : ""
       textFormat: Text.PlainText
       color: root.foreground
       font.family: root.fontFamily
@@ -4104,12 +6195,14 @@ Panel {
     }
   }
 
-  // Rounded track showing the percentage of the allowance used.
+  // Rounded track showing the percentage of the allowance used, with an
+  // optional tick for where the window's clock stands.
   component Meter: Item {
     id: meter
     property real value: -1
+    property real marker: -1
     property string severity: "ok"
-    property real thickness: Math.max(Style.space(4), Math.round(Style.spacing.controlHeight * 0.14))
+    property real thickness: Math.max(Style.space(6), Math.round(Style.spacing.controlHeight * 0.2))
 
     implicitHeight: thickness
 
@@ -4126,101 +6219,53 @@ Panel {
       height: meterTrack.height
       radius: meterTrack.radius
       width: meterTrack.width * root.clamp(meter.value, 0, 1)
-      color: root.colorForSeverity(meter.severity)
+      gradient: Gradient {
+        orientation: Gradient.Horizontal
+        GradientStop { position: 0; color: root.alpha(root.colorForSeverity(meter.severity), 0.6) }
+        GradientStop { position: 1; color: root.colorForSeverity(meter.severity) }
+      }
 
       Behavior on width {
-        NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+        NumberAnimation { duration: 420; easing.type: Easing.OutCubic }
       }
     }
 
+    // The clock tick: a foreground bar on a surface-colored halo, so it
+    // reads on the fill and on the empty track alike. (A bordered 2px
+    // Rectangle painted only its border, in the surface color — invisible
+    // on the track.)
+    Rectangle {
+      visible: meter.marker >= 0
+      x: Math.round(meterTrack.width * root.clamp(meter.marker, 0, 1)) - width / 2
+      anchors.verticalCenter: meterTrack.verticalCenter
+      width: Math.max(5, Style.space(5))
+      height: meterTrack.height + Style.space(8)
+      radius: width / 2
+      color: root.surface
+
+      Rectangle {
+        anchors.centerIn: parent
+        width: Math.max(3, Style.space(3))
+        height: parent.height - 2
+        radius: width / 2
+        color: root.foreground
+      }
+    }
   }
 
   // One row per day: label, bar, tokens. Today is picked out in full
   // foreground so the week reads as a run-up to right now.
-  component DayRow: Item {
-    id: dayRow
-    property var day: null
-    property real ratio: 0
-    property bool today: false
-
-    implicitHeight: Math.max(dayLabel.implicitHeight, dayValue.implicitHeight) + Style.spacing.sm
-
-    Text {
-      id: dayLabel
-      text: root.dayLabel(dayRow.day ? dayRow.day.date : "", dayRow.today)
-      color: dayRow.today ? root.foreground : root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
-      font.bold: dayRow.today
-      anchors.left: parent.left
-      anchors.verticalCenter: parent.verticalCenter
-      width: Style.space(52)
-    }
-
-    Rectangle {
-      id: dayTrack
-      anchors.left: dayLabel.right
-      anchors.right: dayValue.left
-      anchors.leftMargin: Style.space(8)
-      anchors.rightMargin: Style.space(10)
-      anchors.verticalCenter: parent.verticalCenter
-      height: Math.max(Style.space(4), Math.round(Style.spacing.controlHeight * 0.14))
-      radius: height / 2
-      color: root.track
-
-      Rectangle {
-        anchors.left: parent.left
-        anchors.verticalCenter: parent.verticalCenter
-        height: parent.height
-        radius: parent.radius
-        width: parent.width * root.clamp(dayRow.ratio, 0, 1)
-        color: dayRow.today ? root.foreground : root.alpha(root.foreground, 0.55)
-
-        Behavior on width {
-          NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
-        }
-      }
-    }
-
-    Text {
-      id: dayValue
-      text: usage.formatTokenCount(dayRow.day ? Number(dayRow.day.messageCount || 0) : 0)
-      color: dayRow.today ? root.foreground : root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
-      font.bold: true
-      horizontalAlignment: Text.AlignRight
-      anchors.right: parent.right
-      anchors.verticalCenter: parent.verticalCenter
-      width: Style.space(52)
-    }
-
-    MouseArea {
-      id: dayHover
-      anchors.fill: parent
-      hoverEnabled: true
-      acceptedButtons: Qt.NoButton
-    }
-
-    PanelToolTip {
-      visible: dayHover.containsMouse
-      text: root.dayTooltip(dayRow.day, dayRow.today)
-      fontFamily: root.fontFamily
-    }
-  }
-
-  // Model rows read as a table: the share bar fills the row behind the label
-  // instead of stacking under it, which keeps the whole dashboard on one screen.
   component ModelRow: Item {
     id: modelRow
     property var row: null
     property real share: 0
+    property color tint: Commons.Color.accent
 
     implicitHeight: modelName.implicitHeight + Style.spacing.lg
 
     Rectangle {
       anchors.fill: parent
-      radius: Style.cornerRadius
+      radius: root.controlRadius
       color: root.alpha(root.foreground, 0.05)
     }
 
@@ -4229,12 +6274,23 @@ Panel {
       anchors.top: parent.top
       anchors.bottom: parent.bottom
       width: parent.width * root.clamp(modelRow.share, 0, 1)
-      radius: Style.cornerRadius
-      color: root.alpha(root.foreground, 0.14)
+      radius: root.controlRadius
+      color: root.alpha(modelRow.tint, 0.2)
 
       Behavior on width {
         NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
       }
+    }
+
+    Rectangle {
+      id: modelDot
+      anchors.left: parent.left
+      anchors.leftMargin: Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(8)
+      height: width
+      radius: width / 2
+      color: modelRow.tint
     }
 
     Text {
@@ -4245,7 +6301,7 @@ Panel {
       font.family: root.fontFamily
       font.pixelSize: Style.font.bodySmall
       elide: Text.ElideRight
-      anchors.left: parent.left
+      anchors.left: modelDot.right
       anchors.leftMargin: Style.space(8)
       anchors.right: modelTokens.left
       anchors.rightMargin: Style.space(8)

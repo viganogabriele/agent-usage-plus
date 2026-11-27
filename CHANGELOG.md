@@ -4,6 +4,103 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- Redesigned panel dashboard (the bar is unchanged, pixel for pixel):
+  - An overview with Session and Weekly side by side as rings in the theme
+    accent (or the two fullest windows, or prepaid credit); only the Warn and
+    Critical thresholds change a ring's color. Each window's reset is stated
+    once, under its own ring: "Resets in 2h 12m", the wall-clock time, and
+    the outlook at the current rate ("Runs out 39m before reset" or "~88%
+    used by reset"); hovering a ring gives the exact run-out time. A dot on
+    the ring marks how much of the window has elapsed.
+  - Usage lists each free reset the selected account can redeem, with its
+    countdown and local expiry. Hover for redemption instructions. Account
+    rows summarize the count. Codex's compatibility reader preserves each
+    expiry from the app-server. `omarchy-agent-usage-claude-compat` opts Omarchy's
+    own usage request in to Anthropic's `cedar_ember` block, keeps no grant
+    identifiers, and falls back to Omarchy's updater if it fails.
+  - The Cost view's **By day** chart now has real data for Claude and Codex:
+    their compatibility readers keep Omarchy's per-day, per-model token
+    buckets (last 31 days) and the cost wrappers price them into
+    `cost.byDay`. The plugin's updater now publishes Claude through the cost
+    wrapper by default, as it already did for Codex.
+  - Price catalogue 2026-11-27: adds `gpt-6.2-astra`, `gpt-6.2-sol`,
+    `gpt-6.1-sol` and `claude-haiku-5-5`, and corrects `claude-sonnet-5-5`'s
+    cache-read rate to $0.10 per million tokens.
+  - Four views under the overview — Usage, Activity, Models, Cost — instead
+    of one long Details scroll; `e` steps through them, and a view with
+    nothing to show says why.
+  - Window pace on every allowance row: a clock tick on the meter and "12%
+    ahead of pace" / "Out in 1h 20m at this rate". The projection is the
+    window's own average rate and is withheld for the first 5% of a window and
+    for windows whose length is unknown (`logic/insights.js`).
+  - Today, Prompts/7-day average, and Streak tiles, with today compared to the
+    7-day average.
+  - Provider chips ringed with each account's fullest meter, plus a status dot
+    for sign-in/endpoint problems, so the switcher doubles as an overview.
+  - A hero with a plan pill, "Updated … ago", and a one-click refresh button.
+  - Activity: a smoothed, area-filled token trend with a hover guide, then a
+    five-week calendar heatmap with recorded total, 7-day average and
+    week-over-week change. Models: a token-mix bar with cache hit share and
+    per-model use. Cost: the selected account's API-rate estimate
+    with its daily pace, a daily bar chart and models as one stacked bar,
+    then the providers that have an estimate compared side by side.
+  - Accounts of the selected provider as rows with a ring, reading, next
+    reset and Use/Active.
+- Redesigned Settings at the panel's own width (it used to jump to twice
+  the width): Providers / Accounts / Display / Alerts / Sync tabs; a compact
+  card per provider with its plan or problem, an Enabled switch, "In the bar"
+  and "Shows" segmented controls and a live preview built from the real bar
+  parts; an Accounts tab listing every login with its live reading and
+  Sign in / Use / Remove, then New login and Import existing logins;
+  explained toggle rows; a threshold scale drawn from the values being
+  edited; and a pinned save bar (Discard / Save, a dot on the tab holding
+  the edit) that writes only the settings that changed.
+
+### Changed
+
+- The Cost view is plainer: "At API prices" with one figure, one pace line
+  ("$48.27 a day · $1,448.04 a month at this pace") and the fine print in a
+  tooltip; a light daily bar chart without an axis gutter; models as one
+  stacked bar; and "Compared" only when two or more providers have an
+  estimate. The boxed chips, catalogue/coverage captions and "No estimate:"
+  list are gone.
+- One date convention across the panel: spans as "3d 5h", moments as
+  "27 Nov 18:40" for reset and expiry dates, and calendar days as "20 Nov"
+  (was "11/20"), English names and a 24-hour clock regardless of locale.
+- Panel cards and controls keep a soft minimum corner radius (12px cards,
+  8px controls, pill switches) even when Hyprland's window rounding is 0,
+  instead of turning into hard boxes; the bar is untouched.
+
+- Panel text is contrast-checked against the popup surface: secondary text
+  no longer drops below 4.5:1 on dark themes (Everforest, Gruvbox, Tokyo
+  Night, Nord) or reads darker than primary text on light ones, and amber,
+  red and accent text is deepened only as far as a theme needs (the fixed
+  amber was ~1.7:1 on every light theme). Meter and bar colors are
+  unchanged.
+- Token counts past a trillion read `1.2T` instead of `1234.0B`.
+
+### Fixed
+
+- The panel no longer resizes or re-animates on its own: a hover-only hint
+  under the provider marks added and removed a line of text, and every
+  refresh rebuilt the rings and lists (re-filling rings from zero). Lists now
+  update in place, and the refresh icon spins only for a refresh you asked
+  for, not for the background run every opening starts.
+
+- Bar marks with a dark twin (Codex, Devin, OpenRouter, …) were drawn
+  near-black on dark bars whose text color is a mid-tone light, such as
+  Tokyo Night's `#a9b1d6`: the light/dark choice used a 0.5 luminance cutoff
+  instead of the black/white contrast crossover (~0.18). Nothing else about
+  the bar changes.
+- With every provider turned off, the panel header and its Settings gear
+  disappeared, leaving only the `s` key to turn one back on.
+
+- Date labels under the token trend and the API-equivalent-by-day chart no
+  longer pile up at the left edge (a `Row` collapsed its hidden labels), and
+  the daily chart's dollar axis no longer elides values like `$216.…`.
+
 ## [2.3.0] - 2026-11-25
 
 ### Changed

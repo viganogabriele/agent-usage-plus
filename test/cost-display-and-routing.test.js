@@ -14,7 +14,7 @@ const costCalculator = path.join(__dirname, "..", "scripts", "calculate-api-cost
 function readCostCard() {
   const source = fs.readFileSync(panel, "utf8")
   const start = source.indexOf("id: costSection")
-  const end = source.indexOf("// ---------- Usage ----------", start)
+  const end = source.indexOf("// ---------- Settings:", start)
   assert.ok(start >= 0 && end > start, "cost card block should be present")
   return source.slice(start, end)
 }
@@ -22,7 +22,7 @@ function readCostCard() {
 function readDetailModelSection() {
   const source = fs.readFileSync(panel, "utf8")
   const start = source.indexOf("id: detailModelSection")
-  const end = source.indexOf("// ---------- Plan vs API", start)
+  const end = source.indexOf("// ---------- Cost ---", start)
   assert.ok(start >= 0 && end > start, "detail model section should be present")
   return source.slice(start, end)
 }
@@ -30,7 +30,7 @@ function readDetailModelSection() {
 function readSelectedCostCard() {
   const source = fs.readFileSync(panel, "utf8")
   const start = source.indexOf("id: costValueCard")
-  const end = source.indexOf("// ---------- Usage ----------", start)
+  const end = source.indexOf("// ---------- Settings:", start)
   assert.ok(start >= 0 && end > start, "selected cost card block should be present")
   return source.slice(start, end)
 }
@@ -44,9 +44,8 @@ test("panel keeps estimated API cost out of compact view", () => {
   assert.match(source, /id: costSection/)
   assert.match(source, /visible:\s*root\.expanded\s*&&\s*!root\.settingsOpen/)
   assert.match(source, /root\.costProviderRows\.length/)
-  assert.match(source, /text: "All providers"/)
-  assert.match(source, /return "On subscription"/)
-  assert.match(source, /text: "If billed by API"/)
+  assert.match(source, /text: "Compared"/)
+  assert.match(source, /text: "At API prices"/)
   assert.match(source, /root\.cost\.estimateUsd/)
 })
 
@@ -67,14 +66,17 @@ test("panel guards optional cost values before evaluating a hidden card", () => 
 })
 
 test("panel displays the collector cost period next to the estimate", () => {
-  assert.match(readCostCard(), /"If billed by API"\s*\+\s*\(root\.cost\s*&&\s*root\.cost\.period/)
+  // The period rides in the card title's right-aligned note, in words.
+  assert.match(readCostCard(), /text: "At API prices"\s*\n\s*note:\s*root\.cost \? root\.costPeriodLabel\(root\.cost\.period\)/)
 })
 
 test("cost details keep the partial disclosure neutral, singular, and only shown when actionable", () => {
   const source = readCostCard()
   assert.doesNotMatch(source, /color:\s*root\.warn/)
-  assert.match(source, /Partial estimate/)
-  assert.match(source, /Estimated at published API rates · not a bill/)
+  assert.match(source, /root\.unpricedModelText\(root\.cost\)/)
+  // The fine print lives in the figure's tooltip, not in a stack of captions.
+  assert.match(source, /root\.costDetailText\(root\.cost, root\.costSummary\)/)
+  assert.doesNotMatch(source, /catalogue|periods vary|"No estimate: "/)
   assert.match(source, /visible:\s*!!root\.provider\s*&&\s*\(!root\.cost\s*\|\|\s*root\.cost\.incomplete\)/)
 })
 
@@ -89,20 +91,23 @@ test("expanded cost details include provider, daily, and model analytics", () =>
   assert.match(source, /id: costProviderOverview/)
   assert.match(source, /id: costDailyChart/)
   assert.match(source, /id: costModelChart/)
-  assert.match(source, /model: root\.costProviderRows/)
+  // Providers with an estimate get a ranked row, only when there are two.
+  assert.match(source, /costProviderOverview\.priced/)
+  assert.match(source, /visible: priced\.length >= 2/)
   assert.match(source, /id: costValueCard/)
 })
 
-test("selected cost details use the spacious card rhythm", () => {
+test("selected cost details stay plain: one figure, one pace line, light charts", () => {
   const source = readSelectedCostCard()
 
-  assert.match(source, /implicitHeight: costValueContent\.implicitHeight \+ Style\.space\(36\)/)
-  assert.match(source, /anchors\.leftMargin: Style\.space\(18\)/)
-  assert.match(source, /anchors\.rightMargin: Style\.space\(18\)/)
-  assert.match(source, /id: costMetrics[\s\S]*?spacing: Style\.space\(10\)/)
+  assert.match(source, /implicitHeight: costValueContent\.implicitHeight \+ Style\.space\(28\)/)
   assert.match(source, /font\.pixelSize: Style\.font\.display/)
-  assert.match(source, /id: costModelRow[\s\S]*?height: Style\.space\(44\)/)
-  assert.doesNotMatch(source, /costApiHint\(/)
+  assert.match(source, /id: costPace/)
+  assert.match(source, /"a month at this pace"/)
+  // No boxed chips, no y-axis gutter, no accent-tinted card chrome.
+  assert.doesNotMatch(source, /CostChip|axisUsd|axisLeft|GradientStop/)
+  assert.match(source, /id: costModelStack/)
+  assert.match(source, /id: costModelRow[\s\S]*?height: Style\.space\(20\)/)
 })
 
 test("cost average uses the provider's recorded days when collectors omit byDay", () => {
@@ -110,8 +115,7 @@ test("cost average uses the provider's recorded days when collectors omit byDay"
 
   assert.match(source, /CostAnalytics\.summary\(cost, provider\)/)
   assert.match(source, /root\.costSummary\.hasDailyAverage/)
-  assert.match(source, /root\.costSummary\.averageDailyDays/)
-  assert.match(source, /root\.costSummary\.dailySource/)
+  assert.match(source, /root\.costSummary\.averageDailyUsd/)
 })
 
 test("details expansion animates popup height to avoid a re-anchor snap", () => {

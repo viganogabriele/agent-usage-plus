@@ -69,7 +69,7 @@ Item {
       return
     }
     try {
-      var parsed = JSON.parse(raw)
+      const parsed = JSON.parse(raw)
       root.record = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null
     } catch (e) {
       console.warn("agents", "Ignoring bad usage record", root.path, e)

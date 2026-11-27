@@ -10,7 +10,10 @@ account_runner="$script_dir/agent-usage-plus-accounts"
 
 if [[ -z $base_updater ]]; then
   local_updater=${XDG_BIN_HOME:-"$HOME/.local/bin"}/omarchy-agent-usage-update
-  if [[ -x $local_updater ]]; then
+  installed_updater=${XDG_DATA_HOME:-"$HOME/.local/share"}/agent-usage-plus-collectors/bin/omarchy-agent-usage-update
+  # An older companion's symlink must not bypass fixes in this checkout.
+  # Keep honoring independently installed local overrides.
+  if [[ -x $local_updater && $(readlink -f -- "$local_updater") != "$(readlink -f -- "$installed_updater")" ]]; then
     base_updater=$local_updater
   else
     base_updater="$script_dir/omarchy-agent-usage-update"
@@ -19,6 +22,11 @@ fi
 # Use the same live compatibility reader for the default Codex account and
 # imported accounts, even when the optional companion package is not installed.
 export AGENT_USAGE_PLUS_CODEX_COLLECTOR=${AGENT_USAGE_PLUS_CODEX_COLLECTOR:-"$script_dir/omarchy-agent-usage-codex-cost"}
+# Claude, like Codex, goes through the cost wrapper: it runs the
+# compatibility reader that adds Claude's saved free resets, then adds the
+# local API-price estimate (by model and by day) the Cost view shows. Should
+# it fail, the base updater refreshes Claude itself.
+export AGENT_USAGE_PLUS_CLAUDE_COLLECTOR=${AGENT_USAGE_PLUS_CLAUDE_COLLECTOR-"$script_dir/omarchy-agent-usage-claude-cost"}
 
 flags=()
 declare -A requested=()

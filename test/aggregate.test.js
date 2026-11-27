@@ -216,6 +216,11 @@ test("mergeProviderDisplay: a Codex endpoint-down record surfaces its own help t
   assert.match(display.authHelpText, /app-server RPC/)
 })
 
+test("a provider with only reset credits is discoverable", () => {
+  const display = Aggregate.mergeProviderDisplay({ id: "custom", resetCredits: { available: 1 } }, null, {})
+  assert.equal(Aggregate.providerHasData(display), true)
+})
+
 test("providerHasData: a first-run auth or endpoint state remains visible", () => {
   assert.equal(Aggregate.providerHasData({ ready: false, usageStatusText: "Waiting for API key" }), true)
   assert.equal(Aggregate.providerHasData({ ready: false, usageStatusText: "" }), false)
@@ -642,4 +647,75 @@ test("applyProviderOrder: a stale id no longer present in the provider list is s
   const providers = [{ providerId: "claude" }, { providerId: "codex" }]
   const ordered = Aggregate.applyProviderOrder(providers, ["ghost", "codex", "claude"])
   assert.deepEqual(ordered.map((p) => p.providerId), ["codex", "claude"])
+})
+
+test("mergeProviderDisplay: carries the record's updatedAt, bounded", () => {
+  const record = { id: "claude", updatedAt: "2026-11-25T12:00:00+00:00" }
+  assert.equal(Aggregate.mergeProviderDisplay(record, null, null).updatedAt, "2026-11-25T12:00:00+00:00")
+  const long = Aggregate.mergeProviderDisplay({ id: "claude", updatedAt: "x".repeat(500) }, null, null)
+  assert.ok(long.updatedAt.length <= 40)
+  assert.equal(Aggregate.mergeProviderDisplay({ id: "claude" }, null, null).updatedAt, "")
+})
+
+test("dashboards keep the full reported sync history and distinguish missing days from zero", () => {
+  const end = new Date()
+  const history = Array.from({ length: 31 }, (_, i) => {
+    const date = new Date(end)
+    date.setDate(date.getDate() - 30 + i)
+    return { date: Aggregate.dateString(date), messageCount: i }
+  }).filter((_, i) => i !== 19)
+  const profiles = Aggregate.aggregateSnapshots([{ deviceId: "desk", providers: {
+    "claude-work": { recentDays: history }, claude: { recentDays: [] }
+  } }]).providers
+  assert.deepEqual(profiles["claude-work"].recentDays, history)
+  assert.deepEqual(profiles.claude.recentDays, [])
+})
+
+test("malformed dates and amounts never become dashboard readings", () => {
+  const record = Aggregate.mergeProviderDisplay({
+    id: "test", balance: { remaining: null }, cost: { estimateUsd: "" },
+    limits: [{ percent: null }, { percent: "" }, { percent: true }, { percent: "Infinity" }, { percent: 0 }],
+    recentDays: [null, { date: "2026-02-30", messageCount: 7 }, { date: "2026-03-01", messageCount: 0 }]
+  }, null, null)
+  assert.equal(record.balance, null)
+  assert.equal(record.cost, null)
+  assert.deepEqual(record.limits.map(w => w.percent), [0])
+  assert.deepEqual(record.recentDays, [{ date: "2026-03-01", messageCount: 0 }])
+  assert.equal(Aggregate.balanceValue({ remaining: 0 }).remaining, 0)
+  assert.equal(Aggregate.costValue({ estimateUsd: 0 }).estimateUsd, 0)
+})
+
+test("resetCreditsValue keeps only redeemable free resets", () => {
+  assert.deepEqual(Aggregate.resetCreditsValue({ available: 2, nextExpiresAt: "2026-12-10T22:00:00+00:00" }),
+    { available: 2, nextExpiresAt: "2026-12-10T22:00:00+00:00" })
+  assert.deepEqual(Aggregate.resetCreditsValue({ available: "1" }), { available: 1, nextExpiresAt: "" })
+  assert.deepEqual(Aggregate.resetCreditsValue({ available: 3, nextExpiresAt: "soon" }), { available: 3, nextExpiresAt: "" })
+  assert.equal(Aggregate.resetCreditsValue({ available: 500 }).available, 99)
+  for (const raw of [null, "2", {}, { available: 0 }, { available: -1 }, { available: "x" }, { available: true }])
+    assert.equal(Aggregate.resetCreditsValue(raw), null)
+  const merged = Aggregate.mergeProviderDisplay({ id: "codex", resetCredits: { available: 1 } }, null, {})
+  assert.deepEqual(merged.resetCredits, { available: 1, nextExpiresAt: "" })
+  assert.equal(Aggregate.mergeProviderDisplay({ id: "claude" }, null, {}).resetCredits, null)
+})
+
+test("active reset credits keep every reported expiry, including matching dates", () => {
+  const now = Date.parse("2026-11-27T12:00:00Z")
+  const first = "2026-11-28T10:00:00Z"
+  const last = "2026-12-10T22:00:00+00:00"
+  const credits = Aggregate.resetCreditsValue({
+    available: 7,
+    nextExpiresAt: first,
+    expiries: [last, "2026-02-30T00:00:00Z", first, null, first, "2026-11-27T12:00:00Z", "bad"]
+  })
+  assert.deepEqual(Aggregate.activeResetExpiries(credits, now), [
+    Date.parse(first), Date.parse(first), Date.parse(last), null, null, null
+  ])
+  assert.deepEqual(Aggregate.activeResetExpiries(credits, Date.parse(last)), [null, null, null])
+  assert.deepEqual(Aggregate.activeResetExpiries(Aggregate.resetCreditsValue({
+    available: 2, nextExpiresAt: first
+  }), now), [Date.parse(first), null])
+  assert.deepEqual(Aggregate.activeResetExpiries(Aggregate.resetCreditsValue({
+    available: 1, nextExpiresAt: first
+  }), Date.parse(first)), [])
+  assert.deepEqual(Aggregate.activeResetExpiries(null, now), [])
 })

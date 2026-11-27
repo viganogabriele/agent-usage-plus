@@ -11,6 +11,7 @@ test("formatTokenCount: scales to K/M/B and passes small numbers through", () =>
   assert.equal(Format.formatTokenCount(1500), "1.5K")
   assert.equal(Format.formatTokenCount(2_500_000), "2.5M")
   assert.equal(Format.formatTokenCount(3_200_000_000), "3.2B")
+  assert.equal(Format.formatTokenCount(1_234_000_000_000), "1.2T")
 })
 
 test("formatTokenCount: undefined/null read as zero", () => {
@@ -28,6 +29,8 @@ test("formatPercent: optionally shows the available complement", () => {
   assert.equal(Format.formatPercent(0.13, true), "87%")
   assert.equal(Format.formatPercent(0.421, true), "58%")
   assert.equal(Format.formatPercent(1, true), "0%")
+  assert.equal(Format.formatPercent(1.2, true), "0%")
+  assert.equal(Format.formatPercent(1.2, false), "120%")
   assert.equal(Format.formatPercent(0, true), "100%")
 })
 
@@ -35,6 +38,7 @@ test("displayPercent: reverses meter fill without changing usage mode", () => {
   assert.equal(Format.displayPercent(0.13, false), 0.13)
   assert.equal(Format.displayPercent(0.13, true), 0.87)
   assert.equal(Format.displayPercent(1, true), 0)
+  assert.equal(Format.displayPercent(1.2, true), 0)
 })
 
 test("formatDuration: non-positive durations read as now", () => {

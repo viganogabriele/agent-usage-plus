@@ -4,13 +4,18 @@ set -euo pipefail
 # Omarchy's packaged updater discovers collectors under $OMARCHY_PATH/bin and
 # therefore cannot see the user-level Codex compatibility override. Delegate
 # every other provider to it, then publish Codex through the local collector.
+# When AGENT_USAGE_PLUS_CLAUDE_COLLECTOR names one, Claude is published the
+# same way (it adds Claude's saved free resets); should that collector fail,
+# the packaged updater refreshes Claude itself, so Claude never goes blank.
 packaged_updater=${AGENT_USAGE_PLUS_PACKAGED_UPDATER:-/usr/share/omarchy/bin/omarchy-agent-usage-update}
 codex_collector=${AGENT_USAGE_PLUS_CODEX_COLLECTOR:-"$HOME/.local/bin/omarchy-agent-usage-codex"}
+claude_collector=${AGENT_USAGE_PLUS_CLAUDE_COLLECTOR:-}
 usage_dir=${XDG_STATE_HOME:-"$HOME/.local/state"}/omarchy/agents/usage
 
 args=("$@")
 only=()
 codex_excluded=false
+claude_excluded=false
 
 for ((i = 0; i < ${#args[@]}; i++)); do
   case ${args[$i]} in
@@ -18,6 +23,7 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     --except)
       ((i += 1))
       [[ ${args[$i]:-} == codex ]] && codex_excluded=true
+      [[ ${args[$i]:-} == claude ]] && claude_excluded=true
       ;;
     *) only+=("${args[$i]}") ;;
   esac
@@ -33,28 +39,69 @@ elif ((${#only[@]} > 0)); then
   done
 fi
 
-# Run the packaged updater and the Codex collector concurrently: they touch
-# disjoint state, and a transient failure in an unrelated provider must not
-# prevent the Codex refresh this script exists to guarantee.
-"$packaged_updater" --except codex "$@" &
-packaged_pid=$!
-
-if $codex_wanted; then
-  flags=()
-  for arg in "$@"; do
-    [[ $arg == --force || $arg == --limits-only ]] && flags+=("$arg")
-  done
-  record=$("$codex_collector" "${flags[@]}")
-  jq -e . >/dev/null <<<"$record"
-  mkdir -p "$usage_dir"
-  temporary=$(mktemp "$usage_dir/.codex.XXXXXX")
-  trap 'rm -f "$temporary"' EXIT
-  printf '%s\n' "$record" >"$temporary"
-  chmod 0600 "$temporary"
-  mv "$temporary" "$usage_dir/codex.json"
-  trap - EXIT
+claude_wanted=false
+if [[ -n $claude_collector ]] && ! $claude_excluded; then
+  claude_wanted=true
+  if ((${#only[@]} > 0)); then
+    claude_wanted=false
+    for agent in "${only[@]}"; do
+      [[ $agent == claude ]] && claude_wanted=true
+    done
+  fi
 fi
 
-packaged_status=0
-wait "$packaged_pid" || packaged_status=$?
-exit "$packaged_status"
+flags=()
+for arg in "$@"; do
+  [[ $arg == --force || $arg == --limits-only ]] && flags+=("$arg")
+done
+
+publish() (
+  local agent="$1" record="$2" temporary
+  jq -es --arg id "$agent" 'length == 1 and (.[0] | type == "object" and .id == $id)' >/dev/null <<<"$record" || return 1
+  mkdir -p "$usage_dir" || return 1
+  temporary=$(mktemp "$usage_dir/.$agent.XXXXXX") || return 1
+  trap 'rm -f -- "$temporary"' EXIT
+  printf '%s\n' "$record" >"$temporary" || return 1
+  mv -- "$temporary" "$usage_dir/$agent.json"
+)
+
+refresh_claude() {
+  local record
+  if record=$("$claude_collector" "${flags[@]}") && publish claude "$record"; then
+    # The packaged updater announces accounts near a limit after a refresh;
+    # it skipped Claude, so do it here.
+    local omarchy_bin=${OMARCHY_PATH:-/usr/share/omarchy}/bin
+    local accounts=${XDG_STATE_HOME:-"$HOME/.local/state"}/omarchy/agents/accounts/claude.json
+    if [[ -f $accounts && -x $omarchy_bin/omarchy-agent-account-state ]]; then
+      "$omarchy_bin/omarchy-agent-account-state" alert claude || true
+    fi
+    return 0
+  fi
+  "$packaged_updater" "${flags[@]}" claude
+}
+
+# Run the packaged updater and the local collectors concurrently: they touch
+# disjoint state, and a transient failure in an unrelated provider must not
+# prevent the Codex refresh this script exists to guarantee.
+excepts=(--except codex)
+[[ -n $claude_collector ]] && excepts+=(--except claude)
+"$packaged_updater" "${excepts[@]}" "$@" &
+packaged_pid=$!
+
+claude_pid=
+if $claude_wanted; then
+  refresh_claude &
+  claude_pid=$!
+fi
+
+status=0
+if $codex_wanted; then
+  if ! record=$("$codex_collector" "${flags[@]}") || ! publish codex "$record"; then
+    status=1
+  fi
+fi
+wait "$packaged_pid" || status=$?
+if [[ -n $claude_pid ]]; then
+  wait "$claude_pid" || status=1
+fi
+exit "$status"

@@ -78,6 +78,7 @@ report for it right now" — not "no one should bother."
 | `retryAdvised` | boolean | no | Set this to `true` when your collector failed to reach its remote endpoint for transport reasons (DNS/network down, not a real HTTP error) rather than an auth problem. The panel schedules one retry ~30s later instead of waiting out the full refresh interval, and only for agents that set this flag — one provider's outage doesn't put every other collector on a fast retry loop. |
 | `limits` | array of limit windows | no | Rate-limit allowances (session/weekly/model-scoped/etc). See "Limits" below. Mutually meaningful alongside or instead of `balance` — an agent can report neither, either, or (unusually) both. |
 | `balance` | object | no | A prepaid credit ledger, for agents billed by consumption rather than a rate-limit window. See "Balance" below. |
+| `resetCredits` | object | no | Free full resets the provider granted and the account can redeem. See "Free reset credits" below. |
 | `cost` | object | no | An optional, derived estimate of what usage would cost at published API rates — not a real bill. See "Cost" below. |
 | `todayPrompts` | integer | no | Number of prompts sent today (local time). Leave at `0`/omit when `hasPromptStats` is `false`. |
 | `todaySessions` | integer | no | Number of distinct sessions today. |
@@ -123,9 +124,22 @@ hover.
 | `label` | string | recommended | Free-text description of the window, e.g. `"Session (5-hour)"`, `"Weekly (7-day)"`, `"30m window"`. Used to infer `title` when `title` is absent, by looking for words like "week"/"7-day"/"month"/"30-day"/"session". Max 80 chars. |
 | `title` | string | no | Explicit, already-resolved window name (`"Session"`, `"Weekly"`, `"Monthly"`, or a model name like `"Opus 5 Weekly"` for a model-scoped limit). **Prefer setting this explicitly** — label-sniffing breaks on a label like `"Opus 5 (1M context)"`, where `"1M"` gets misread as a one-minute window. If your allowance is scoped to a specific model, title it `"<model display name> <Window>"` so it reads apart from the account-wide windows. Max 80 chars. |
 | `percent` | number, `0.0`-`1.0` | **yes** | Fraction of the allowance used, already normalized to `0.0`-`1.0` (not `0`-`100`). A negative value or a missing field causes the panel to drop that limit entry entirely rather than show a nonsensical number — so omit an entry you can't compute rather than sending a placeholder. |
-| `tokenLimit` | integer, > 0 | no | The actual token allowance for this exact window. Only provide it when the provider exposes a real quota, not an inferred conversion from `percent`. Together with token history and `resetsAt`, it enables the panel's burn-rate projection; without it the meter and reset countdown still work but no exhaustion prediction is shown. |
+| `tokenLimit` | integer, > 0 | no | The actual token allowance for this exact window. Only provide it when the provider exposes a real quota, not an inferred conversion from `percent`. Together with token history and `resetsAt`, it enables the panel's token burn-rate projection ("Token trend: exhausted in …"), which then replaces the window-pace run-out for that row. Without it the meter, reset countdown and window pace (below) still work. |
 | `resetsAt` | string (ISO-8601, with timezone) | no | When the window resets. Used to render "Resets in 3h 12m" and, on the next run, to decide whether a cached percentage is still valid (a window whose `resetsAt` has already passed is treated as stale and dropped rather than shown as a leftover reading). Omit or leave empty when unknown — the panel then just doesn't show a countdown. |
-| `startedAt` | string (ISO-8601, with timezone) | no | The actual start of this exact window. Keep it when the source has it: it makes cached readings auditable and is available to future finer-grained projection logic. Do not guess from a label. |
+| `startedAt` | string (ISO-8601, with timezone) | no | The actual start of this exact window. Keep it when the source has it: together with `resetsAt` it gives the window's exact length, which the panel's window pace needs (see below). Do not guess from a label. |
+
+**Window pace.** For each window the panel compares `percent` with how much
+of the window's clock had passed when the record was written (`updatedAt`):
+a tick on the meter, "12% ahead of pace" / "under pace", and — when the
+window's own average rate would reach 100% before `resetsAt` — "Out in 1h 20m
+at this rate". This needs the window's length, taken from `startedAt` +
+`resetsAt`, or from an explicit `title` of exactly `"Session"` (5 hours) or
+one ending in `"Weekly"` (7 days) or `"Daily"` (24 hours). A title the panel
+had to infer from `label`, or a calendar-aligned monthly window without
+`startedAt`, gets no pace. Pace is also withheld for the first 5% of a
+window, and when the record is older than 15 minutes or 10% of the window.
+Set `updatedAt` so a carried-forward reading is not judged against the
+current clock.
 
 Up to 20 limit entries per record are kept; extras are dropped. The panel
 picks the highest-`percent` entry as the "binding" one for the bar's meter
@@ -188,7 +202,7 @@ would have cost billed à la carte.
 your collector computes by multiplying token counts by a price list you
 maintain yourself; it is never read from an actual invoice or billing
 API for a rate-limited plan (if it were, you'd be reporting `balance`
-instead). The panel labels this figure as an "If billed by API" equivalent
+instead). The panel labels this figure "At API prices" (published rates, not a bill)
 wherever it's shown, and your collector should do the same anywhere else it
 surfaces the number — never present it as "this is what you were charged."
 
@@ -229,6 +243,30 @@ intended for the Claude and Codex transcript collectors. When a transcript
 has both priced and unknown models, it emits a clearly marked partial subtotal
 with `unknownModels`; when every used model is unknown it emits no cost at all.
 It never guesses a price from a similarly named model.
+
+## Free reset credits
+
+```json
+{
+  "available": 3,
+  "nextExpiresAt": "2026-12-10T22:00:00Z",
+  "expiries": ["2026-12-10T22:00:00Z", "2026-12-15T17:00:00Z", ""]
+}
+```
+
+- `available` is the count at collection time, capped at 99. Omit the
+  block when the account has no redeemable credits.
+- `expiries` lists one timestamp per credit, including repeated timestamps.
+  Use ISO-8601 with an explicit time zone and `""` when the provider has
+  no date for a credit. Keep `nextExpiresAt` as the earliest known expiry
+  (or `""`) for older clients.
+- For older records that only have `nextExpiresAt`, Usage displays that
+  date and marks the remaining dates as unreported. The panel removes known
+  expired credits from the list and the count while open.
+- Reset credits belong to the selected account's local record. They appear
+  in Usage and are omitted from sync snapshots and the bar. The bundled
+  compatibility collectors report them for Claude and Codex.
+
 
 ## Error states
 

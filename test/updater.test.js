@@ -63,8 +63,31 @@ test("plugin refresh uses the Codex compatibility updater without a separate ins
       AGENT_USAGE_PLUS_CODEX_COLLECTOR: codex },
   })
   assert.deepEqual(fs.readFileSync(calls, "utf8").trim().split("\n").sort(),
-    ["codex:--force", "packaged:--except codex --force codex --except devin --except agy"])
+    ["codex:--force", "packaged:--except codex --except claude --force codex --except devin --except agy"])
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, "state/omarchy/agents/usage/codex.json"))).limits[0].percent, 0.2)
+})
+
+function claudeRouting(extraEnv) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-usage-claude-route-"))
+  const base = path.join(root, "base")
+  const seen = path.join(root, "seen")
+  executable(base, `printf '%s' "\${AGENT_USAGE_PLUS_CLAUDE_COLLECTOR-unset}" >"${seen}"`)
+  const env = { ...process.env, AGENT_USAGE_PLUS_BASE_UPDATER: base, ...extraEnv }
+  if (!("AGENT_USAGE_PLUS_CLAUDE_COLLECTOR" in extraEnv)) delete env.AGENT_USAGE_PLUS_CLAUDE_COLLECTOR
+  execFileSync("bash", [pluginUpdater, "claude"], { env })
+  return { root, seen: fs.readFileSync(seen, "utf8") }
+}
+
+test("plugin updater publishes Claude through the cost wrapper by default", t => {
+  const result = claudeRouting({})
+  t.after(() => fs.rmSync(result.root, { recursive: true, force: true }))
+  assert.equal(result.seen, path.join(path.dirname(pluginUpdater), "omarchy-agent-usage-claude-cost"))
+})
+
+test("an empty Claude collector setting still leaves Claude to Omarchy", t => {
+  const result = claudeRouting({ AGENT_USAGE_PLUS_CLAUDE_COLLECTOR: "" })
+  t.after(() => fs.rmSync(result.root, { recursive: true, force: true }))
+  assert.equal(result.seen, "")
 })
 
 test("a failing packaged updater still lets the Codex refresh land", t => {
@@ -190,16 +213,7 @@ test("plugin updater keeps account settings out of Omarchy's updater arguments",
   assert.doesNotMatch(fs.readFileSync(calls, "utf8"), /profiles-json/)
 })
 
-test("plugin updater reaches the real packaged updater through an installed --codex-cli-compat override, not itself", t => {
-  // Regression for a reviewed-but-unreproduced recursion concern: the
-  // plugin dispatcher's own local_updater auto-detection (no
-  // AGENT_USAGE_PLUS_BASE_UPDATER override, exactly how Main.qml invokes it)
-  // must resolve the installed ~/.local/bin/omarchy-agent-usage-update to the
-  // safe compat wrapper the installer actually links it to, not back into
-  // itself. `install.sh --codex-cli-compat` already targets the wrapper (see
-  // "compat installer links both the collector and updater" above); this
-  // proves the full default-detection chain reaches the real packaged
-  // updater end to end instead of spinning or silently doing nothing.
+test("the plugin uses its current updater even when an older companion is installed", t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-usage-e2e-"))
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
   const bin = path.join(root, "bin")
@@ -211,23 +225,76 @@ test("plugin updater reaches the real packaged updater through an installed --co
   executable(packaged, `printf 'packaged:%s\\n' "$*" >>"${calls}"`)
   executable(codex, `printf 'codex:%s\\n' "$*" >>"${calls}"; printf '%s\\n' '{"id":"codex","ready":true,"limits":[{"percent":0.1}]}'`)
   executable(bundled, `printf 'bundled:%s\\n' "$*" >>"${calls}"`)
+  const claude = path.join(root, "claude-collector")
+  executable(claude, `printf 'claude:%s\\n' "$*" >>"${calls}"; printf '%s\\n' '{"id":"claude","limits":[]}'`)
 
   execFileSync("bash", [installer, "--codex-cli-compat"], {
     env: { ...process.env, XDG_BIN_HOME: bin, XDG_DATA_HOME: data },
   })
 
+  executable(path.join(data, "agent-usage-plus-collectors", "bin", "omarchy-agent-usage-update"), "exit 42")
+
   execFileSync("bash", [pluginUpdater, "--force"], {
     env: {
       ...process.env,
       XDG_BIN_HOME: bin,
+      XDG_DATA_HOME: data,
       XDG_STATE_HOME: path.join(root, "state"),
       AGENT_USAGE_PLUS_PACKAGED_UPDATER: packaged,
       AGENT_USAGE_PLUS_CODEX_COLLECTOR: codex,
       AGENT_USAGE_PLUS_BUNDLED_RUNNER: bundled,
+      AGENT_USAGE_PLUS_CLAUDE_COLLECTOR: claude,
     },
   })
 
   const lines = fs.readFileSync(calls, "utf8").trim().split("\n")
-  assert.ok(lines.includes("packaged:--except codex --force --except devin --except agy"))
+  assert.ok(lines.includes("packaged:--except codex --except claude --force --except devin --except agy"))
+  assert.ok(lines.includes("claude:--force"))
   assert.ok(lines.includes("codex:--force"))
+})
+
+function claudeHarness(args, claudeBody) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-usage-claude-"))
+  const packaged = path.join(root, "packaged-updater")
+  const codex = path.join(root, "codex-collector")
+  const claude = path.join(root, "claude-collector")
+  const calls = path.join(root, "calls")
+  executable(packaged, `printf 'packaged:%s\\n' "$*" >>"${calls}"`)
+  executable(codex, `printf '%s\\n' '{"id":"codex","limits":[]}'`)
+  executable(claude, `printf 'claude:%s\\n' "$*" >>"${calls}"; ${claudeBody}`)
+  execFileSync("bash", [updater, ...args], {
+    env: {
+      ...process.env,
+      OMARCHY_PATH: path.join(root, "no-omarchy"),
+      XDG_STATE_HOME: path.join(root, "state"),
+      AGENT_USAGE_PLUS_PACKAGED_UPDATER: packaged,
+      AGENT_USAGE_PLUS_CODEX_COLLECTOR: codex,
+      AGENT_USAGE_PLUS_CLAUDE_COLLECTOR: claude,
+    },
+  })
+  return { root, calls: fs.readFileSync(calls, "utf8").trim().split("\n").sort(),
+    record: path.join(root, "state", "omarchy", "agents", "usage", "claude.json") }
+}
+
+test("local updater publishes Claude through the free-reset reader", t => {
+  const result = claudeHarness(["--force", "claude"],
+    `printf '%s\\n' '{"id":"claude","limits":[],"resetCredits":{"available":1,"nextExpiresAt":""}}'`)
+  t.after(() => fs.rmSync(result.root, { recursive: true, force: true }))
+  assert.deepEqual(result.calls, ["claude:--force", "packaged:--except codex --except claude --force claude"])
+  assert.equal(JSON.parse(fs.readFileSync(result.record)).resetCredits.available, 1)
+})
+
+test("a failing Claude reader hands Claude back to the packaged updater", t => {
+  const result = claudeHarness(["--force"], "exit 3")
+  t.after(() => fs.rmSync(result.root, { recursive: true, force: true }))
+  assert.deepEqual(result.calls, ["claude:--force", "packaged:--except codex --except claude --force", "packaged:--force claude"])
+  assert.equal(fs.existsSync(result.record), false)
+})
+
+
+test("an invalid Claude record leaves the packaged updater responsible for Claude", t => {
+  const result = claudeHarness(["--force", "claude"], `printf '%s\n' '{"id":"other","limits":[]}'`)
+  t.after(() => fs.rmSync(result.root, { recursive: true, force: true }))
+  assert.ok(result.calls.includes("packaged:--force claude"))
+  assert.equal(fs.existsSync(result.record), false)
 })

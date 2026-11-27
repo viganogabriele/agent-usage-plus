@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,16 +11,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from agent_usage_collectors.transcript_cost import decorate  # noqa: E402
 
-system_base = Path("/usr/share/omarchy/bin/omarchy-agent-usage-claude")
-saved_base = Path.home() / ".local/bin/agent-usage-plus-base-claude"
-# Preserve a user-owned scanner as the preferred base: it may contain a
-# compatibility fix newer than the packaged Omarchy copy.
-base = os.environ.get("AGENT_USAGE_PLUS_CLAUDE_BASE_COLLECTOR") or str(saved_base if saved_base.is_file() else system_base)
+# Always go through the compat wrapper: it resolves the same
+# AGENT_USAGE_PLUS_CLAUDE_BASE_COLLECTOR / saved / packaged priority (and
+# never picks one of this plugin's own links), and adds Claude's saved free
+# resets to the record.
+base = str(Path(__file__).with_name("omarchy-agent-usage-claude-compat"))
 try:
     result = subprocess.run([base, *sys.argv[1:]], text=True, capture_output=True, check=True, timeout=90)
     record = json.loads(result.stdout)
     if not isinstance(record, dict):
         raise ValueError("base collector did not emit an object")
     print(json.dumps(decorate(record, "claude", "All time"), separators=(",", ":")))
-except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError) as exc:
-    print(json.dumps({"id": "claude", "name": "Claude Code", "ready": False, "usageStatusText": "Claude collector unavailable", "authHelpText": f"Install Claude Code or set AGENT_USAGE_PLUS_CLAUDE_BASE_COLLECTOR. ({type(exc).__name__})"}, separators=(",", ":")))
+except (OSError, subprocess.SubprocessError, ValueError) as exc:
+    print(f"Claude compatibility collector failed ({type(exc).__name__})", file=sys.stderr)
+    raise SystemExit(1)

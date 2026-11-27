@@ -41,7 +41,28 @@ the excluded models, and the panel says so. If every used model is unknown,
 `cost` remains absent — never publish a fabricated `$0` estimate. Store
 `pricingVersion` with the output so a cached record is auditable after prices
 change. The wrapper also passes the base collector's `activeDays` through to
-the cost block. When `byDay` is unavailable, the Details view uses
+the cost block.
+
+### By day
+
+Omarchy's scanner sees every reply's day and model but its record keeps only
+lifetime per-model buckets and one combined token count per day, which
+cannot be priced. The Claude and Codex compatibility readers therefore
+install `collectors/agent_usage_collectors/daily_usage.py` before running
+Omarchy's collector: it swaps Omarchy's shared `Stats` for a subclass whose
+snapshot also carries `dailyModelUsage` (`{ "YYYY-MM-DD": { model:
+TokenBucket } }`, the last 31 local days, at most 64 models a day), and adds a
+key to the scan cache's `match` so a cache written without it is rescanned
+once. `decorate()` hands those buckets to `calculateCost` as
+`dailyModelUsage`, which prices each day into `cost.byDay`, and removes the
+field from the record: it is an internal hand-off, not part of the collector
+contract. A day whose models are all unpriced has no `byDay` row. A
+standalone base scanner that does not import Omarchy's shared module (such as
+an old saved `agent-usage-plus-base-codex`) is run unchanged and simply
+produces no `byDay`.
+
+`byModel` and `estimateUsd` stay "All time"; `byDay` covers at most the last
+31 days and the chart names its first and last date. When `byDay` is unavailable, the Details view uses
 `estimateUsd / activeDays` for **Avg / recorded day** and says explicitly that
 the value is derived; it never invents a day-by-day chart.
 
@@ -51,7 +72,9 @@ is versioned in `logic/api-price-catalogue.js`. Update its version,
 Anthropic cache writes use the standard five-minute write rate because the
 record does not carry cache TTL; a collector with one-hour write usage must
 not estimate it until the contract can distinguish it. OpenAI GPT-5.6 and
-later cache writes use 1.25 times the standard input rate. The estimate uses
+later cache writes use 1.25 times the standard input rate; GPT-6.1/6.2 publish
+30-minute and 12-hour cache writes, and the catalogue uses the 30-minute rate.
+Claude Haiku 5.5 is priced at its standard tier (prompts up to 100K tokens). The estimate uses
 standard short-context rates: transcript totals do not reveal request-level
 context length, processing tier, or region, so those adjustments cannot be
 reconstructed. Unknown model ids are never pattern-matched.

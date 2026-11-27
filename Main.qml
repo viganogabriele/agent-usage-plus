@@ -26,7 +26,10 @@ Item {
   readonly property string accountDataRoot: Quickshell.env("XDG_DATA_HOME") || home + "/.local/share"
   readonly property var accountProfiles: Accounts.normalizeProfiles(setting("accountProfiles", {}))
   readonly property var selectedAccounts: setting("selectedAccounts", {})
-  onAccountProfilesChanged: if (refreshStarted) runUpdate("normal")
+  // Shell writes replace the whole settings object. Only profile changes need
+  // another collector run.
+  readonly property string profilesJson: JSON.stringify(accountProfiles)
+  onProfilesJsonChanged: if (refreshStarted) runUpdate("normal")
   property string accountImportStatus: ""
   readonly property bool accountImportRunning: accountImportProcess.running
 
@@ -48,20 +51,9 @@ Item {
         try {
           var result = JSON.parse(text)
           if (result.error) { root.accountImportStatus = result.error; return }
-          var profiles = Object.assign({}, root.accountProfiles)
-          var count = 0
-          for (var i = 0; i < result.profiles.length; i++) {
-            var profile = result.profiles[i]
-            var exists = Object.keys(profiles).some(function(id) {
-              return profiles[id].provider === profile.provider && profiles[id].path === profile.path
-            })
-            if (exists) continue
-            var id = Accounts.nextProfileId(profile.provider, profile.name, profiles)
-            if (!id) id = Accounts.nextProfileId(profile.provider, "account", profiles)
-            profiles[id] = profile
-            count++
-          }
-          if (count) root.writeSetting("accountProfiles", JSON.stringify(profiles))
+          var additions = Accounts.newProfiles(root.accountProfiles, result.profiles)
+          var count = Object.keys(additions).length
+          if (count) root.writeSetting("accountProfiles", JSON.stringify(Accounts.applyEdits(root.accountProfiles, additions)))
           root.accountImportStatus = count ? "Imported " + count + " account(s). Refreshing usage…" : "These accounts are already configured."
         } catch (e) { root.accountImportStatus = "Account discovery failed. Check the paths and try again." }
       }
@@ -73,18 +65,15 @@ Item {
   }
 
   function activeAccountId(provider) {
-    var selected = selectedAccounts && selectedAccounts[provider]
-    return selected && accountProfiles[selected] && accountProfiles[selected].provider === provider
-      ? selected : provider
+    return Accounts.activeId(provider, accountProfiles, selectedAccounts)
   }
 
   function addAccount(provider, name) {
-    var id = Accounts.nextProfileId(provider, name, accountProfiles)
-    if (!id) return ""
-    var profiles = Object.assign({}, accountProfiles)
-    profiles[id] = { provider: provider, name: String(name).trim().slice(0, 80) }
-    writeSetting("accountProfiles", JSON.stringify(profiles))
-    return id
+    var additions = Accounts.newProfiles(accountProfiles, [{ provider: provider, name: String(name || "") }])
+    var ids = Object.keys(additions)
+    if (!ids.length) return ""
+    writeSetting("accountProfiles", JSON.stringify(Accounts.applyEdits(accountProfiles, additions)))
+    return ids[0]
   }
 
   function selectAccount(provider, id) {
@@ -96,11 +85,11 @@ Item {
 
   function removeAccount(id) {
     if (!accountProfiles[id]) return
-    var profiles = Object.assign({}, accountProfiles)
-    var provider = profiles[id].provider
+    var provider = accountProfiles[id].provider
     var wasSelected = activeAccountId(provider) === id
-    delete profiles[id]
-    writeSetting("accountProfiles", JSON.stringify(profiles))
+    var edit = {}
+    edit[id] = null
+    writeSetting("accountProfiles", JSON.stringify(Accounts.applyEdits(accountProfiles, edit)))
     if (wasSelected) selectAccount(provider, provider)
   }
 
@@ -316,6 +305,10 @@ Item {
     }
   }
 
+  // True while a collector run this widget started is in flight; the
+  // panel's refresh control spins on it.
+  readonly property bool updating: !!updateProcess && updateProcess.running
+
   function updateCommand(kind, agentIds) {
     var updateArgs = []
     var providers = settings && settings.providers ? settings.providers : {}
@@ -331,7 +324,7 @@ Item {
     var scriptPath = decodeURIComponent(scriptUrl.replace(/^file:\/\//, ""))
     if (kind === "force") updateArgs.unshift("--force")
     if (kind === "limits") updateArgs.unshift("--limits-only")
-    updateArgs.push("--profiles-json", JSON.stringify(root.accountProfiles))
+    updateArgs.push("--profiles-json", root.profilesJson)
     return ["/bin/bash", scriptPath].concat(updateArgs)
   }
 
@@ -680,7 +673,6 @@ Item {
     }
     setProviderFields(id, fields)
   }
-  function setProviderShowInBar(id, value) { setProviderField(id, "showInBar", !!value) }
 
   function setProviderLabelMode(id, value) {
     var v = value === "icon" || value === "iconPercent" ? value : "full"
